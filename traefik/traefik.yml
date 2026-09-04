@@ -1,0 +1,75 @@
+# Configuration statique Traefik v3 (reverse proxy partagé prod + staging).
+# Déployée sur le VPS dans /opt/alivaon/traefik/traefik.yml.
+
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+# ── Points d'entrée ────────────────────────────────────────────────────────
+entryPoints:
+  # HTTP : redirige tout vers HTTPS.
+  web:
+    address: ":80"
+    http:
+      # Supprime silencieusement tout en-tête dont le nom contient un caractère
+      # aliasant (_ . % $ | ~ ^ ! # & ' * +). Sans cela un client peut envoyer
+      # X_Forwarded_Proto ou X.Forwarded.Proto : PHP-FPM les lit comme la
+      # variable HTTP_X_FORWARDED_PROTO, soit le meme en-tete que
+      # X-Forwarded-Proto, pourtant gere par Traefik.
+      #
+      # L'enjeu est concret ici : docker/nginx/default.conf fait deriver
+      # `fastcgi_param HTTPS` de $http_x_forwarded_proto. La notion de connexion
+      # securisee vue par Symfony derive donc d'un en-tete client. nginx la
+      # protege aujourd'hui via underscores_in_headers, mais c'est une valeur
+      # par defaut, pas une decision explicite. Cf. avis GHSA-rf44-j88r-hh8c.
+      #
+      # `delete` et non `reject` : un en-tete aliasant legitime emis par un
+      # client tiers est retire sans casser la requete. Le format CLF des
+      # journaux d'acces ne permet pas d'inventorier ce que recoivent
+      # reellement les sites, d'ou le choix de la strategie non bloquante.
+      aliasHeadersStrategy: delete
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  # HTTPS.
+  websecure:
+    address: ":443"
+    http:
+      # Meme protection que sur l'entryPoint web (voir commentaire ci-dessus).
+      aliasHeadersStrategy: delete
+
+# ── Fournisseur Docker ──────────────────────────────────────────────────────
+providers:
+  docker:
+    # Accès direct au socket Docker, monté dans le conteneur. Depuis Traefik
+    # v3.6, le provider négocie la version d'API avec le démon : le sidecar
+    # HAProxy de réécriture (1.24 -> 1.44) a été supprimé le 2026-09-04.
+    endpoint: "unix:///var/run/docker.sock"
+    # Rien n'est exposé sans label explicite `traefik.enable=true`.
+    exposedByDefault: false
+    # Traefik ne route que les conteneurs branchés sur ce réseau partagé.
+    network: traefik_proxy
+
+# ── Résolveur de certificats Let's Encrypt (HTTP challenge) ─────────────────
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: contact@alivaon.com
+      # Stocké sur un volume persistant (voir docker-compose.yml). Doit être
+      # en droits 600, sinon Traefik refuse de démarrer.
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+log:
+  level: INFO
+
+accessLog: {}
+
+# API/dashboard désactivés (pas de port exposé). Passer à true + router sécurisé
+# si un dashboard est souhaité plus tard.
+api:
+  dashboard: false

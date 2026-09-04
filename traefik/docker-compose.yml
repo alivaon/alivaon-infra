@@ -1,0 +1,35 @@
+# Stack Traefik (reverse proxy partagé). Déployée dans /opt/alivaon/traefik/.
+# Lancée une fois via scripts/first-deploy.sh, puis persistante.
+
+services:
+  traefik:
+    image: traefik:v3.7.12
+    container_name: traefik
+    restart: unless-stopped
+    # Seul conteneur qui publie des ports sur l'hôte (80/443, ouverts par ufw).
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Configuration statique.
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      # Stockage persistant des certificats Let's Encrypt.
+      - ./letsencrypt:/letsencrypt
+      # Socket Docker monté en RW : se connecter à un socket unix nécessite le
+      # droit d'écriture (un montage :ro ferait échouer le connect()).
+      #
+      # Depuis Traefik v3.6, le provider docker négocie la version d'API avec le
+      # démon. Le sidecar HAProxy qui réécrivait 1.24 -> 1.44 pour contourner la
+      # rupture de Docker Engine 29 a donc été supprimé le 2026-09-04, ainsi que
+      # le réseau docker_api qui le desservait.
+      #
+      # L'image traefik tourne en root (Config.User vide) : aucun group_add
+      # n'est nécessaire pour lire le socket (root:docker).
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - traefik_proxy   # routage des apps
+
+networks:
+  # Réseau partagé déjà créé sur le VPS -> déclaré externe, jamais recréé ici.
+  traefik_proxy:
+    external: true

@@ -1,0 +1,56 @@
+# Stack Portainer CE (interface d'administration Docker).
+# Déployée dans /opt/alivaon/portainer/, selon la convention du VPS
+# (un répertoire par stack, docker-compose.yml à sa racine).
+#
+# Accès strictement local : Portainer n'est PAS exposé publiquement et n'est
+# PAS routé par Traefik. Il écoute uniquement sur la loopback ; l'accès se fait
+# par tunnel SSH depuis le poste de l'admin.
+#
+# Cette stack est autonome : elle ne partage aucun réseau, volume ni fichier
+# avec les stacks traefik / production / staging.
+
+services:
+  portainer:
+    # Version figée volontairement, plutôt que le tag flottant :lts. Une montée
+    # de version doit rester une décision explicite et non l'effet de bord d'un
+    # `docker compose pull`.
+    # 2.45.0 = ouverture de la ligne LTS courante (2026-08-27).
+    # digest manifest-list : sha256:511f3f06c96fe3b993ebeaafde311c1959cae73a7ef825dba6397d51b450dffa
+    # digest linux/amd64   : sha256:0b0116995938b14493fff2001c2f48a268ab55a70b72448a3ed5a1159b1e9cfb
+    #
+    # NB : cette version gère la négociation d'API du démon. Le correctif est
+    # entré en 2.33.5 (LTS) / 2.36.0 (STS) ; aucun sidecar de proxy d'API n'est
+    # nécessaire ici, contrairement à ce qu'impose Traefik v3.5 (cf. README/notes).
+    image: portainer/portainer-ce:2.45.0
+    container_name: portainer
+    restart: unless-stopped
+
+    # IMPÉRATIF : le préfixe 127.0.0.1 restreint la publication à la loopback.
+    # Sans lui, Docker insère une règle DNAT dans la chaîne iptables DOCKER,
+    # évaluée AVANT les règles d'UFW : le port 9443 serait alors joignable
+    # depuis Internet bien qu'UFW soit actif et n'autorise que 22/80/443.
+    # Ne jamais retirer ce préfixe.
+    ports:
+      - "127.0.0.1:9443:9443"
+
+    volumes:
+      # Socket Docker monté en RW : se connecter à un socket unix requiert le
+      # droit d'écriture (un montage :ro ferait échouer le connect()).
+      # C'est ce socket seul qui permet à Portainer de voir tous les conteneurs.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Données persistantes de Portainer (comptes, réglages, endpoints).
+      - portainer_data:/data
+
+    # Interdit à un processus du conteneur de gagner des privilèges via setuid.
+    security_opt:
+      - no-new-privileges:true
+
+    # Pas de section `networks` : la découverte passe par le socket Docker.
+    # Rattacher Portainer à traefik_proxy ou traefik_docker_api (ce dernier est
+    # `internal` et appartient à la stack Traefik) serait inutile et intrusif.
+
+volumes:
+  # `name:` explicite pour obtenir exactement `portainer_data` et non le nom
+  # préfixé par le projet — nom stable, désinstallation sans ambiguïté.
+  portainer_data:
+    name: portainer_data

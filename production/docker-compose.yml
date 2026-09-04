@@ -1,0 +1,79 @@
+# Stack PRODUCTION — déployée dans /opt/alivaon/production/.
+# Domaines : alivaon.com + www.alivaon.com
+#
+# L'image est référencée par tag mouvant `production` : le pipeline pousse
+# à la fois un tag SHA (traçable) et le tag `production`, et fait un `pull`.
+
+services:
+  app:
+    image: ghcr.io/alivaon/alivaon-symfony:production
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Uploads utilisateurs persistants (VichUploader).
+      - uploads:/var/www/html/public/uploads
+      # CV des candidats — HORS docroot, jamais servis par nginx. Persistés
+      # pour survivre à la recréation du conteneur à chaque déploiement.
+      - cv_private:/var/www/html/var/private
+    networks:
+      - traefik_proxy   # exposition via Traefik
+      - internal        # accès à la base
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+      # Router HTTPS pour alivaon.com + www.alivaon.com
+      - "traefik.http.routers.alivaon.rule=Host(`alivaon.com`) || Host(`www.alivaon.com`)"
+      - "traefik.http.routers.alivaon.entrypoints=websecure"
+      - "traefik.http.routers.alivaon.tls=true"
+      - "traefik.http.routers.alivaon.tls.certresolver=letsencrypt"
+      # Redirige alivaon.com -> www.alivaon.com (URL canonique = www).
+      # L'ancre ^https?://alivaon\.com/ ne matche que l'apex (pas www., qui
+      # commence par "www.") -> pas de boucle de redirection.
+      - "traefik.http.routers.alivaon.middlewares=alivaon-canonical"
+      - "traefik.http.middlewares.alivaon-canonical.redirectregex.regex=^https?://alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.alivaon-canonical.redirectregex.replacement=https://www.alivaon.com/$${1}"
+      - "traefik.http.middlewares.alivaon-canonical.redirectregex.permanent=true"
+      # Port interne du conteneur (nginx).
+      - "traefik.http.services.alivaon.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    # Pas de --default-authentication-plugin : ce flag est supprimé en MySQL 8.4+
+    # et bloquerait le démarrage. L'app (PDO moderne) gère caching_sha2_password.
+    env_file:
+      - .env
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      # Réseau interne UNIQUEMENT — jamais de section `ports:` exposant 3306.
+      # (ufw ne protégerait pas un port publié par Docker.)
+      - internal
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  db_data:
+  uploads:
+  cv_private:
+
+networks:
+  traefik_proxy:
+    external: true
+  internal:
+    # Réseau privé app <-> db, non exposé.
+    internal: true

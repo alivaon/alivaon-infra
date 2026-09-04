@@ -1,0 +1,76 @@
+# Stack STAGING — déployée dans /opt/alivaon/staging/.
+# Domaine : staging.alivaon.com (protégé par basic auth Traefik).
+#
+# Identique à production mais : routeurs/services suffixés `-staging`,
+# volume base distinct (db_data_staging) et middleware basicauth.
+
+services:
+  app:
+    image: ghcr.io/alivaon/alivaon-symfony:staging
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - uploads_staging:/var/www/html/public/uploads
+      # CV des candidats — HORS docroot, jamais servis par nginx.
+      - cv_private_staging:/var/www/html/var/private
+    networks:
+      - traefik_proxy
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+      # Route staging + www.staging -> cert Let's Encrypt couvrant les 2 SANs.
+      - "traefik.http.routers.alivaon-staging.rule=Host(`staging.alivaon.com`) || Host(`www.staging.alivaon.com`)"
+      - "traefik.http.routers.alivaon-staging.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-staging.tls=true"
+      - "traefik.http.routers.alivaon-staging.tls.certresolver=letsencrypt"
+      # Redirige staging.alivaon.com -> www.staging.alivaon.com (canonique = www,
+      # cohérent avec la prod). L'ancre ^https?://staging\.alivaon\.com/ ne matche
+      # pas www.staging (qui commence par "www.") -> pas de boucle.
+      # Ordre des middlewares : redirection D'ABORD, puis basic auth.
+      - "traefik.http.routers.alivaon-staging.middlewares=staging-canonical,staging-auth"
+      - "traefik.http.middlewares.staging-canonical.redirectregex.regex=^https?://staging\\.alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.staging-canonical.redirectregex.replacement=https://www.staging.alivaon.com/$${1}"
+      - "traefik.http.middlewares.staging-canonical.redirectregex.permanent=true"
+      # Basic auth : bloque l'indexation et l'accès public au préprod.
+      # Le hash est fourni via .env (STAGING_BASICAUTH), voir .env.example.
+      - "traefik.http.middlewares.staging-auth.basicauth.users=${STAGING_BASICAUTH}"
+      - "traefik.http.services.alivaon-staging.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    # Pas de --default-authentication-plugin : supprimé en MySQL 8.4+.
+    env_file:
+      - .env
+    volumes:
+      - db_data_staging:/var/lib/mysql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  db_data_staging:
+  uploads_staging:
+  cv_private_staging:
+
+networks:
+  traefik_proxy:
+    external: true
+  internal:
+    internal: true
