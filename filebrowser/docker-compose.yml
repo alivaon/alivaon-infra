@@ -67,7 +67,21 @@ services:
       - ./data:/database
       - ./data:/config
       # Les deux volumes applicatifs, montés SOUS la racine /srv.
-      - production_uploads:/srv/production-uploads
+      #
+      # PRODUCTION EN LECTURE SEULE. File Browser v2.63.23 est atteint par
+      # GHSA-c4fr-5f24-4wrj (high, SANS CORRECTIF, projet archivé) : le nettoyage
+      # consécutif à l'échec d'un téléversement supprime récursivement des
+      # dossiers en contournant Perm.Delete. Un simple envoi qui échoue suffit.
+      #
+      # `:ro` déplace la protection du niveau applicatif — celui-là même que la
+      # faille contourne — vers le noyau, qui refuse l'appel unlink quel que
+      # soit le chemin de code emprunté. Consultation et téléchargement des
+      # fichiers de production restent possibles ; toute modification, non.
+      #
+      # Ne pas repasser en :rw sans qu'un remplaçant maintenu soit en place.
+      - production_uploads:/srv/production-uploads:ro
+      # Le préprod reste inscriptible : risque résiduel assumé, la perte y étant
+      # sans conséquence.
       - staging_uploads:/srv/staging-uploads
 
     networks:

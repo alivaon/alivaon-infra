@@ -466,30 +466,20 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8082/api/login
 Le passage par `-e ADMIN_PW` sans valeur, plutôt que par la ligne de commande,
 évite que le mot de passe apparaisse dans `ps`.
 
-### ⚠️ File Browser est un projet archivé
+### File Browser — projet archivé, production en lecture seule
 
-Le dépôt amont a été **archivé le 1er septembre 2026** : plus aucune version,
-plus aucun correctif de sécurité. La version déployée, `v2.63.23`, est la
-dernière. Quatre avis de sécurité la concernent **sans correctif disponible**,
-dont un de gravité *high* :
+Le dépôt amont est **archivé depuis le 1ᵉʳ septembre 2026** : `v2.63.23` est la
+dernière version, et aucun correctif de sécurité ne viendra. Quatre avis la
+concernent sans correctif, dont un *high* qui permet une suppression récursive
+de dossiers.
 
-- `GHSA-c4fr-5f24-4wrj` *(high)* — le nettoyage après échec d'un téléversement
-  supprime récursivement des dossiers, en contournant `Perm.Delete`. **C'est un
-  risque de perte de données sur les uploads de production**, déclenchable par
-  un simple envoi qui échoue.
-- `GHSA-39cx-23x9-5c8p` *(medium)* — WebSocket de commandes sans borne avant
-  contrôle des droits. Atténué : `disableExec` est actif et le compte admin a
-  `Execute: false`.
-- `GHSA-448h-jr2h-3vhp` *(medium)* — épuisement mémoire à la conversion de
-  sous-titres. Atténué par `mem_limit: 512m`.
-- `GHSA-7w29-q235-57m9` *(medium)* — les alias symboliques contournent les
-  règles de refus de chemin. Sans objet ici : aucune règle de refus n'est
-  utilisée.
+**Le volume de production est monté en lecture seule** (`:ro`), ce qui place la
+protection dans le noyau plutôt que dans le contrôle de permissions applicatif
+que la faille contourne. Consultation et téléchargement restent possibles ;
+toute écriture est refusée. Le préprod reste inscriptible.
 
-L'exposition reste faible — l'accès exige une clé SSH — mais le premier point
-est un risque d'exploitation, pas d'intrusion. À arbitrer : conserver en
-connaissance de cause, monter les uploads de production en lecture seule, ou
-remplacer par un outil maintenu.
+Détail des avis, de la mitigation et de l'échéance de revue : **[Dette
+connue](#dette-connue)**.
 
 ### Ce qu'il ne faut pas casser
 
@@ -535,6 +525,76 @@ Contrôle, à tout moment :
 ssh alivaon "ss -tln | grep -E ':808[123] '"
 # Les trois lignes doivent porter 127.0.0.1, jamais 0.0.0.0 ni [::]
 ```
+
+---
+
+## Dette connue
+
+### File Browser — dépendance à un projet abandonné
+
+**Le fait.** Le dépôt amont `filebrowser/filebrowser` a été archivé le
+**1ᵉʳ septembre 2026**, trois jours avant la mise en service de cette stack.
+`v2.63.23` est la dernière version publiée. Il n'y aura **plus aucun correctif
+de sécurité**, y compris pour les failles déjà connues et publiées.
+
+**La faille qui compte ici.** `GHSA-c4fr-5f24-4wrj` *(high, sans correctif,
+affecte >= 2.5.0)* : lorsqu'un téléversement échoue, la routine de nettoyage
+supprime **récursivement** des dossiers, en contournant le contrôle
+`Perm.Delete` et les règles de refus. Ce n'est pas une voie d'intrusion — c'est
+un chemin de perte de données déclenchable par un simple envoi interrompu, sans
+la moindre intention hostile.
+
+Trois autres avis affectent la version, sans correctif : `GHSA-39cx-23x9-5c8p`
+*(medium)*, `GHSA-448h-jr2h-3vhp` *(medium)*, `GHSA-7w29-q235-57m9` *(medium)*.
+Ils sont couverts par la configuration en place — `disableExec`, `Execute:
+false` sur le compte admin, `mem_limit: 512m`, aucune règle de refus de chemin.
+
+**La mitigation en place.** Le volume `production_uploads` est monté
+**en lecture seule** :
+
+```yaml
+- production_uploads:/srv/production-uploads:ro
+```
+
+Ce choix déplace la protection du niveau applicatif — celui-là même que la
+faille contourne — vers le **noyau**, qui refuse l'appel `unlink` quel que soit
+le chemin de code emprunté. Le chemin vulnérable devient donc **sans effet sur
+la production**, y compris s'il est atteint. Vérifié en conditions réelles :
+
+```
+/dev/sda1 /srv/production-uploads ext4 ro,relatime 0 0
+rm:    cannot remove '.../articles/....png': Read-only file system
+touch: cannot touch '.../.essai':            Read-only file system
+mkdir: cannot create directory '.../essai':  Read-only file system
+```
+
+La lecture et le téléchargement restent intacts : les neuf dossiers de
+production sont listables et leurs fichiers consultables.
+
+**Le risque résiduel, assumé.** Le préprod reste monté en écriture. Une
+suppression récursive y demeure possible ; la perte y est sans conséquence, les
+données de `staging` étant reproductibles. C'est un arbitrage délibéré, pas un
+oubli : File Browser doit rester un outil de gestion quelque part, faute de quoi
+il n'a plus d'objet.
+
+**Échéance de revue : mars 2027.** À cette date, remplacer File Browser par un
+outil maintenu. D'ici là, ne pas repasser `production_uploads` en `:rw`, et ne
+pas monter les volumes `cv_private`. `scripts/diff-vps.sh` signalera toute
+divergence du `docker-compose.yml` par rapport à ce dépôt.
+
+### Sauvegarde des fichiers téléversés
+
+Les dossiers `uploads` de production **ne sont couverts par aucune sauvegarde**.
+Les seuls fichiers présents dans `*/backups/` sont des dumps MySQL
+`pre-deploy-*.sql.gz` : ils contiennent la base, jamais les fichiers, et vivent
+sur le serveur lui-même. Aucun outil de sauvegarde n'est installé, aucune tâche
+planifiée ne les traite.
+
+La lecture seule sur la production protège des suppressions accidentelles **par
+File Browser**, mais ne remplace pas une sauvegarde : elle ne couvre ni la perte
+du serveur, ni une suppression par l'application elle-même. Sujet distinct, à
+traiter pour lui-même — voir « Aucune sauvegarde hors serveur » dans les
+chantiers ouverts.
 
 ---
 
