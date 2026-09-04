@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ce fichier est le premier commit du dépôt, avant toute configuration.
+# Un secret commité une seule fois reste dans l'historique Git même après
+# suppression du fichier : la seule protection est de ne jamais l'y mettre.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Variables d'environnement : mots de passe de base, APP_SECRET, DSN mailer,
+# hash BasicAuth du préprod. Jamais versionnées.
+.env
+.env.*
+# Seuls les gabarits sans valeur sont suivis.
+!.env.example
+
+# Certificats Let's Encrypt : acme.json contient les CLÉS PRIVÉES des
+# certificats servis en production. Sa fuite permettrait l'usurpation des
+# domaines. Traefik le régénère au premier démarrage (voir README).
+letsencrypt/
+letsencrypt.bak-*/
+acme.json
+
+# Dumps SQL pré-déploiement. Ce ne sont pas seulement des fichiers volumineux :
+# ce sont des exports de bases APPLICATIVES DE PRODUCTION, contenant des données
+# personnelles. Les versionner serait un manquement RGPD autant qu'un problème
+# de volume — et l'historique Git étant permanent, la faute serait irréversible.
+backups/
+
+# Copies horodatées prises avant chaque intervention sur le VPS. L'historique
+# Git remplit désormais cette fonction pour les fichiers suivis ; ces copies
+# restent sur le serveur et n'ont pas leur place ici.
+*.bak-*
+
+# macOS
+.DS_Store
