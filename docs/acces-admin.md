@@ -36,7 +36,20 @@ seule interface répondrait.
 Le terminal reste occupé tant que le tunnel vit. C'est voulu : il est visible, et
 `Ctrl+C` le ferme.
 
-### Variante `~/.ssh/config`
+### Variante `~/.ssh/config` — raccourci `alivaon-admin`
+
+> **Cette variante ne fonctionne qu'après avoir ajouté le bloc ci-dessous à
+> `~/.ssh/config`.** Sans lui, `ssh alivaon-admin` échoue sur
+> `Could not resolve hostname alivaon-admin` : ce nom n'existe nulle part
+> ailleurs, ni dans le DNS, ni sur le serveur. C'est un alias local, et rien
+> d'autre. En cas de doute :
+>
+> ```bash
+> grep -A9 '^Host alivaon-admin' ~/.ssh/config
+> ```
+>
+> Aucune sortie = le bloc n'est pas installé, utiliser la commande complète
+> ci-dessus.
 
 Pour réduire l'ouverture à une commande courte, ajouter ce bloc à
 `~/.ssh/config` sur le poste macOS, **à côté** du bloc `Host alivaon` existant
@@ -56,7 +69,25 @@ Host alivaon-admin
     LocalForward 8083 127.0.0.1:8083
 ```
 
-L'ouverture devient :
+Pour l'ajouter sans éditer le fichier à la main :
+
+```bash
+cat >> ~/.ssh/config <<'CFG'
+
+Host alivaon-admin
+    HostName 178.104.185.156
+    User alivaondev
+    IdentityFile ~/.ssh/id_ed25519
+    RequestTTY no
+    SessionType none
+    ExitOnForwardFailure yes
+    LocalForward 8081 127.0.0.1:8081
+    LocalForward 8082 127.0.0.1:8082
+    LocalForward 8083 127.0.0.1:8083
+CFG
+```
+
+**Le bloc une fois en place**, l'ouverture devient :
 
 ```bash
 ssh alivaon-admin
@@ -64,7 +95,15 @@ ssh alivaon-admin
 
 `SessionType none` est l'équivalent de `-N` en fichier de configuration ; sur les
 versions d'OpenSSH antérieures à 8.7 qui ne le connaissent pas, le retirer et
-lancer `ssh -N alivaon-admin`.
+lancer `ssh -N alivaon-admin` — cette commande courte suppose elle aussi le bloc
+installé.
+
+Contrôler que le fichier est bien lu, sans rien ouvrir :
+
+```bash
+ssh -G alivaon-admin | grep localforward
+# Trois lignes attendues, une par port.
+```
 
 ## 3. Les trois interfaces
 
@@ -242,6 +281,33 @@ ssh alivaon "ss -tln | grep -E ':808[123] '"
 Les trois lignes attendues portent `127.0.0.1`. Une ligne manquante signifie que
 le conteneur correspondant ne tourne pas ; une ligne en `0.0.0.0` serait une
 anomalie grave à corriger immédiatement (le service serait exposé publiquement).
+
+### « Could not resolve hostname alivaon-admin »
+
+Le raccourci est utilisé sans que son bloc existe dans `~/.ssh/config`. Ce nom
+n'est pas un domaine : il n'existe que dans ce fichier, sur ce poste.
+
+```bash
+grep -A9 '^Host alivaon-admin' ~/.ssh/config
+```
+
+Aucune sortie : soit installer le bloc (§2), soit utiliser la commande complète,
+qui ne dépend que de `Host alivaon`.
+
+### « bind: Address already in use » à l'ouverture
+
+Un tunnel est **déjà ouvert** — souvent dans un autre terminal, ou lancé plus tôt
+avec `-f`. `ExitOnForwardFailure` refuse alors d'en ouvrir un second, ce qui est
+le comportement voulu : mieux vaut un refus net qu'un tunnel à moitié établi.
+
+```bash
+lsof -nP -iTCP:8081 -iTCP:8082 -iTCP:8083 -sTCP:LISTEN
+ps -o pid=,command= -p <PID>
+```
+
+Si la ligne de commande affichée est bien un tunnel vers `alivaon`, il n'y a rien
+à faire : les interfaces sont déjà accessibles. Sinon, fermer le processus fautif
+avant de rouvrir.
 
 ### Le tunnel s'ouvre mais la page ne charge pas
 
