@@ -355,6 +355,10 @@ Trois interfaces d'administration, toutes sur le modèle de Portainer :
 sous-domaine, aucun port ouvert dans UFW. Elles sont injoignables depuis
 Internet, et le resteront.
 
+> Cette section décrit la **conception** et ce qu'il ne faut pas casser. Pour
+> l'usage courant — ouvrir le tunnel, se connecter, retrouver un mot de passe,
+> diagnostiquer une panne — voir **[docs/acces-admin.md](docs/acces-admin.md)**.
+
 | Service | Port | Périmètre |
 |---|---|---|
 | Adminer — production | `127.0.0.1:8081` | base MySQL de production, et rien d'autre |
@@ -604,6 +608,9 @@ chantiers ouverts.
   la configuration actuelle et les chantiers ouverts
 - [docs/portainer.md](docs/portainer.md) — installation, accès, mise à jour,
   désinstallation
+- [docs/acces-admin.md](docs/acces-admin.md) — guide d'accès aux trois interfaces
+  d'administration : tunnel SSH, connexion à Adminer et à File Browser,
+  emplacement des mots de passe, dépannage
 
 ## Portée de ce dépôt
 
