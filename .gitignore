@@ -29,5 +29,12 @@ backups/
 # restent sur le serveur et n'ont pas leur place ici.
 *.bak-*
 
+# Persistance de File Browser : database.db contient le hash du mot de passe
+# administrateur et la clé de signature des jetons JWT ; settings.json décrit
+# la configuration de service. Ces fichiers sont propres au serveur, appartiennent
+# à l'uid 82, et n'ont aucune raison d'être versionnés. La procédure qui les
+# régénère est dans le README.
+filebrowser/data/
+
 # macOS
 .DS_Store

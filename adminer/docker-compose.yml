@@ -1,0 +1,199 @@
+# Stack Adminer (administration des bases MySQL).
+# Déployée dans /opt/alivaon/adminer/, selon la convention du VPS
+# (un répertoire par stack, docker-compose.yml à sa racine).
+#
+# Accès strictement local, sur le modèle de Portainer : aucun label Traefik,
+# aucun sous-domaine, publication sur la loopback uniquement. L'accès se fait
+# par tunnel SSH depuis le poste de l'admin.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# POURQUOI DEUX INSTANCES PLUTÔT QU'UNE
+#
+# Une instance unique branchée sur les deux réseaux aurait été possible, mais
+# `production-db-1` et `staging-db-1` répondent TOUS DEUX à l'alias réseau `db`
+# sur leur réseau respectif. Un conteneur voyant les deux réseaux aurait un `db`
+# ambigu : la résolution renverrait une adresse arbitraire, et l'on pourrait
+# croire modifier le préprod en modifiant la production.
+#
+# Ici, chaque instance ne voit qu'un seul réseau. `db` redevient univoque, et
+# l'environnement est déterminé par le PORT du tunnel, pas par un champ de
+# formulaire. Une erreur d'environnement devient structurellement impossible.
+#
+#   127.0.0.1:8081  ->  production   (réseau production_internal)
+#   127.0.0.1:8083  ->  staging      (réseau staging_internal)
+#
+# Le port 8082 est réservé à File Browser, d'où la numérotation non contiguë.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# POURQUOI CHAQUE INSTANCE A UN SECOND RÉSEAU, DIT « PORTEUR »
+#
+# Depuis Docker 28, un conteneur rattaché UNIQUEMENT à des réseaux `internal`
+# ne peut plus publier de port. Le refus est SILENCIEUX : le conteneur démarre,
+# passe `healthy`, et `docker compose ps` n'affiche aucune anomalie — mais
+# aucune écoute n'est créée sur l'hôte. Vérifié sur ce VPS (Docker 29.6.1) :
+#
+#   conteneur sur réseau internal + -p 127.0.0.1:x  ->  aucune écoute
+#   conteneur sur réseau normal   + -p 127.0.0.1:x  ->  écoute présente
+#
+# Ce n'est pas lié à `EnableUserlandProxy`, qui est actif ici et sans effet sur
+# ce point. C'est un durcissement délibéré du moteur.
+#
+# D'où un second réseau par instance, non `internal`, dont l'unique rôle est de
+# porter la publication du port. Pour ne pas redonner au passage un accès
+# Internet à un outil qui parle à la base de production, le NAT sortant y est
+# désactivé (`enable_ip_masquerade=false`) : les paquets sortants ne sont pas
+# masqués, partent avec une adresse privée et ne reviennent jamais.
+#
+# Résultat vérifié : port publié sur la loopback ET aucune sortie Internet.
+#
+# Réserve à connaître : contrairement à un réseau `internal` pur, l'instance
+# peut joindre l'hôte par la passerelle du bridge, donc les services écoutant
+# sur 0.0.0.0 (22, 80, 443). Sans identifiants, et pour qui dispose déjà d'un
+# accès SSH, cela n'ouvre aucun privilège nouveau.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PRODUCTION ────────────────────────────────────────────────────────────
+  adminer-production:
+    # Version figée, comme pour Portainer : une montée de version doit rester
+    # une décision explicite, jamais l'effet de bord d'un `docker compose pull`.
+    #
+    # La ligne 5.x est retenue plutôt que la 6.0.1 parue le 2026-08-30 : une
+    # version majeure de quelques jours n'a pas sa place devant une base de
+    # production. 5.5.1 est le dernier correctif de la ligne mûre.
+    #
+    # Variante `standalone` = serveur PHP intégré écoutant sur 8080. La variante
+    # `fastcgi` supposerait un nginx en amont, inutile ici.
+    #
+    # digest manifest-list : sha256:1596436ca8559900018ad4f3da275c66cc7032d0ee4a29e32f13349c96405106
+    # Adminer 5.5.1 sur PHP 8.4.25, Alpine.
+    image: adminer:5.5.1-standalone
+    container_name: adminer-production
+    restart: unless-stopped
+
+    # IMPÉRATIF : le préfixe 127.0.0.1 restreint la publication à la loopback.
+    # Sans lui, Docker insère une règle DNAT dans la chaîne iptables DOCKER,
+    # évaluée AVANT les règles d'UFW : le port serait joignable depuis Internet
+    # bien qu'UFW soit actif et n'autorise que 22/80/443. Ne jamais le retirer.
+    ports:
+      - "127.0.0.1:8081:8080"
+
+    networks:
+      # Un seul réseau de données : la production. Ce conteneur ne peut joindre
+      # ni le préprod, ni aucune autre stack. L'alias `db` y est univoque.
+      - production_internal
+      # Réseau porteur, sans NAT sortant : sert exclusivement à rendre la
+      # publication du port possible (cf. en-tête).
+      - porteur_production
+
+    environment:
+      # Pré-remplit UNIQUEMENT le champ « serveur » du formulaire de connexion.
+      # Ce n'est pas un identifiant : ni utilisateur, ni mot de passe, ni base
+      # ne sont fournis ici, et aucun ne doit l'être.
+      #
+      # Volontairement le nom de conteneur et non l'alias `db`, pourtant valide
+      # ici : `db` afficherait un formulaire STRICTEMENT IDENTIQUE dans les deux
+      # instances. Le nom complet rend l'environnement lisible à l'écran, et
+      # une capture d'écran ou une hésitation devant deux onglets ouverts ne
+      # peut plus tourner à la confusion prod/préprod.
+      ADMINER_DEFAULT_SERVER: production-db-1
+
+    # L'image tourne déjà en uid 100 (adminer), non privilégié. On retire par
+    # surcroît toute capacité : un serveur PHP sur un port > 1024 n'en a besoin
+    # d'aucune.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Adminer est un outil ponctuel, pas un service de charge. 256 Mo suffisent
+    # largement à PHP 8.4 ; la limite protège l'hôte d'une requête pathologique
+    # qui ramènerait un résultat démesuré en mémoire.
+    mem_limit: 256m
+    # Le VPS n'a pas de swap ; on aligne explicitement pour que la limite
+    # mémoire soit une limite dure et non contournable.
+    memswap_limit: 256m
+    pids_limit: 128
+
+    # L'image ne fournit aucun healthcheck. Une simple requête sur la page de
+    # connexion suffit : elle prouve que PHP répond, sans toucher à la base.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── PRÉPROD ───────────────────────────────────────────────────────────────
+  adminer-staging:
+    image: adminer:5.5.1-standalone
+    container_name: adminer-staging
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8083:8080"
+
+    networks:
+      # Un seul réseau de données : le préprod. Symétrique de la production.
+      - staging_internal
+      - porteur_staging
+
+    environment:
+      # Cf. l'instance de production : nom de conteneur explicite, pour que les
+      # deux formulaires ne soient jamais indiscernables.
+      ADMINER_DEFAULT_SERVER: staging-db-1
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  # `external: true` : ces réseaux appartiennent aux stacks production et
+  # staging. Cette stack s'y rattache sans jamais les créer ni les modifier.
+  #
+  # CONSÉQUENCE OPÉRATOIRE À CONNAÎTRE — un `docker compose down` lancé dans
+  # /opt/alivaon/production ou /opt/alivaon/staging échouera désormais à
+  # supprimer son réseau (« network has active endpoints »), l'instance Adminer
+  # y étant attachée. Les conteneurs de la stack, eux, s'arrêtent normalement.
+  # Pour un down complet, arrêter d'abord l'instance Adminer correspondante.
+  #
+  # Les deux réseaux sont déclarés `internal: true` par leurs stacks : ils n'ont
+  # aucune route sortante. Adminer n'ayant pas d'autre réseau, il est lui aussi
+  # privé d'accès à Internet — il n'existe aucun canal d'exfiltration depuis un
+  # outil qui parle à la base de production. C'est délibéré.
+  #
+  production_internal:
+    external: true
+  staging_internal:
+    external: true
+
+  # ── Réseaux porteurs, créés et détenus par CETTE stack ────────────────────
+  # Un par instance, jamais partagé : deux instances sur un porteur commun
+  # pourraient se joindre, ce qui n'aurait aucune utilité et affaiblirait la
+  # séparation stricte recherchée.
+  #
+  # `enable_ip_masquerade=false` retire la règle MASQUERADE : aucun accès
+  # Internet. `name:` explicite pour un nom stable, non préfixé par le projet.
+  porteur_production:
+    name: adminer_porteur_production
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  porteur_staging:
+    name: adminer_porteur_staging
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

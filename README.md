@@ -132,6 +132,17 @@ ssh alivaon 'cd /opt/alivaon/staging    && docker compose up -d'
 # 4. Portainer (optionnel)
 scp -r portainer/ alivaon:/opt/alivaon/
 ssh alivaon 'cd /opt/alivaon/portainer && docker compose up -d'
+
+# 5. Adminer et File Browser (optionnels) — APRÈS production et staging, dont
+#    ils réutilisent les réseaux et les volumes.
+scp -r adminer/ alivaon:/opt/alivaon/
+ssh alivaon 'cd /opt/alivaon/adminer && docker compose up -d'
+
+scp -r filebrowser/ alivaon:/opt/alivaon/
+#    File Browser exige une initialisation avant son premier démarrage :
+#    voir « Accès à Adminer et File Browser » plus bas. Ne PAS lancer
+#    `docker compose up -d` avant, sous peine de laisser le serveur créer
+#    lui-même un compte administrateur.
 ```
 
 `first-deploy.sh` est **idempotent** : il ne recrée rien d'existant et ne touche
@@ -249,17 +260,26 @@ les deux côtés sous la main. Le serveur ne connaît pas le contenu du dépôt,
 cloner un dépôt privé demanderait d'y déposer des identifiants GitHub — ce que
 cette infrastructure évite délibérément.
 
-Seuls les 6 fichiers copiés du serveur sont comparés ; les autres (README,
-`docs/`, `scripts/`, `.env.example`) n'existent que dans le dépôt.
+La liste des fichiers n'est **plus écrite en dur** : le script découvre tous les
+`*/docker-compose.yml` du dépôt, et y ajoute `first-deploy.sh` et
+`traefik/traefik.yml`. Un nouveau service déposé dans son propre dossier est
+donc couvert sans toucher au script. Le sens inverse est vérifié aussi : une
+stack présente sur le VPS mais absente du dépôt est signalée. Les autres
+fichiers (README, `docs/`, `scripts/`, `.env.example`) n'existent que dans le
+dépôt et ne sont pas comparés.
+
+Au-delà des fichiers, le script contrôle un invariant qui ne se lit dans aucun
+d'entre eux : les réseaux porteurs doivent conserver
+`enable_ip_masquerade=false`. Voir « Ce qu'il ne faut pas casser ».
+
+Codes de sortie : `0` conforme, `1` écart de contenu, `2` fichier ou stack
+manquant, `3` régression sur un réseau porteur.
 
 Pour un contrôle manuel, la partie serveur se réduit à :
 
 ```bash
 ssh alivaon 'sha256sum /opt/alivaon/first-deploy.sh \
-  /opt/alivaon/traefik/docker-compose.yml /opt/alivaon/traefik/traefik.yml \
-  /opt/alivaon/production/docker-compose.yml \
-  /opt/alivaon/staging/docker-compose.yml \
-  /opt/alivaon/portainer/docker-compose.yml'
+  /opt/alivaon/traefik/traefik.yml /opt/alivaon/*/docker-compose.yml'
 ```
 
 ## Chantiers ouverts
@@ -325,6 +345,196 @@ attendu.
 inscrit ses règles DNAT dans la chaîne iptables `DOCKER`, évaluée **avant** UFW :
 sans ce préfixe, le port 9443 serait joignable depuis Internet bien qu'UFW soit
 actif. Détails dans [docs/portainer.md](docs/portainer.md).
+
+---
+
+## Accès à Adminer et File Browser
+
+Trois interfaces d'administration, toutes sur le modèle de Portainer :
+**publication sur la loopback uniquement**, aucun label Traefik, aucun
+sous-domaine, aucun port ouvert dans UFW. Elles sont injoignables depuis
+Internet, et le resteront.
+
+| Service | Port | Périmètre |
+|---|---|---|
+| Adminer — production | `127.0.0.1:8081` | base MySQL de production, et rien d'autre |
+| File Browser | `127.0.0.1:8082` | uploads de production et de préprod |
+| Adminer — préprod | `127.0.0.1:8083` | base MySQL de préprod, et rien d'autre |
+
+### Tunnels SSH
+
+```bash
+# Adminer production
+ssh -N -L 8081:127.0.0.1:8081 alivaon
+
+# File Browser
+ssh -N -L 8082:127.0.0.1:8082 alivaon
+
+# Adminer préprod
+ssh -N -L 8083:127.0.0.1:8083 alivaon
+
+# Les trois d'un coup
+ssh -N -L 8081:127.0.0.1:8081 -L 8082:127.0.0.1:8082 -L 8083:127.0.0.1:8083 alivaon
+```
+
+Puis `http://localhost:8081`, `http://localhost:8082`, `http://localhost:8083`.
+En clair, contrairement à Portainer : le trafic ne quitte jamais le tunnel SSH,
+qui assure lui-même le chiffrement.
+
+### Connexion à Adminer
+
+| Champ | Production (`:8081`) | Préprod (`:8083`) |
+|---|---|---|
+| Système | MySQL | MySQL |
+| Serveur | `production-db-1` *(pré-rempli)* | `staging-db-1` *(pré-rempli)* |
+| Utilisateur | `alivaon_app`, ou `root` | idem |
+| Mot de passe | `MYSQL_PASSWORD` (ou `MYSQL_ROOT_PASSWORD`) du `.env` de la stack | idem |
+| Base | `alivaon_db` | `alivaon_db` |
+
+Les deux bases portent le **même nom**, `alivaon_db`, et le même utilisateur
+applicatif. Rien à l'écran ne les distingue une fois connecté — d'où deux
+instances séparées plutôt qu'une seule.
+
+**Une instance par environnement, et c'est structurel.** `production-db-1` et
+`staging-db-1` répondent tous deux à l'alias réseau `db` sur leur réseau. Une
+instance unique branchée sur les deux aurait eu un `db` ambigu. Ici chaque
+instance ne voit qu'un réseau : celle du port 8081 ne peut pas joindre le
+préprod, celle du 8083 ne peut pas joindre la production. L'environnement est
+déterminé par le port du tunnel, pas par un champ de formulaire. Le champ
+« serveur » est pré-rempli avec le nom de conteneur complet, et non `db`, pour
+que les deux écrans ne soient jamais indiscernables.
+
+### Connexion à File Browser
+
+Utilisateur `admin`. Le mot de passe a été généré aléatoirement et n'existe
+qu'à un seul endroit, non versionné :
+
+```bash
+ssh alivaon 'cat /opt/alivaon/filebrowser/.env'
+```
+
+Seuls deux dossiers sont exposés : `production-uploads` et `staging-uploads`.
+La racine n'est **pas** `/opt/alivaon` — l'y placer aurait mis les `.env`
+applicatifs et `traefik/letsencrypt/acme.json`, qui contient les clés privées
+TLS, derrière une interface web. Les volumes `cv_private` sont délibérément
+exclus, même en lecture : ce sont des CV de candidats.
+
+Le service tourne sous l'uid **82**, celui de `www-data` dans l'image de
+l'application, propriétaire réel des fichiers téléversés. Sous l'uid 1000 —
+celui de `/opt/alivaon` — File Browser aurait été lecture seule dans la plupart
+des dossiers, et les fichiers qu'il aurait créés auraient été ingérables par
+Symfony.
+
+Initialisation, à faire **avant** le premier `docker compose up -d` :
+
+```bash
+cd /opt/alivaon/filebrowser
+IMG=filebrowser/filebrowser:v2.63.23-s6
+MNT="-v $PWD/data:/database -v $PWD/data:/config"
+
+umask 077 && printf 'FB_ADMIN_PASSWORD=%s\n' "$(openssl rand -base64 24)" > .env
+mkdir -p data && cat > data/settings.json <<'JSON'
+{ "port": 80, "baseURL": "", "address": "", "log": "stdout",
+  "database": "/database/database.db", "root": "/srv" }
+JSON
+
+# chown vers l'uid 82 sans sudo, via un conteneur jetable
+docker run --rm -v $PWD/data:/d alpine:3.22 chown -R 82:82 /d
+
+docker run --rm --user 82:82 $MNT --entrypoint filebrowser $IMG \
+  config init -d /database/database.db \
+  --address "" --port 80 --root /srv --disableExec --auth.method json
+
+set -a; . ./.env; set +a; export ADMIN_PW="$FB_ADMIN_PASSWORD"
+docker run --rm --user 82:82 -e ADMIN_PW $MNT --entrypoint sh $IMG -c \
+  'filebrowser users add admin "$ADMIN_PW" -d /database/database.db \
+   --perm.admin --perm.execute=false --perm.share=false'
+
+docker compose up -d
+```
+
+Créer le compte **avant** le premier démarrage est ce qui empêche File Browser
+de générer lui-même un administrateur par défaut. Le contrôle :
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8082/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin","recaptcha":""}'
+# 403 attendu. Un 200 signifierait que le compte par défaut existe.
+```
+
+Le passage par `-e ADMIN_PW` sans valeur, plutôt que par la ligne de commande,
+évite que le mot de passe apparaisse dans `ps`.
+
+### ⚠️ File Browser est un projet archivé
+
+Le dépôt amont a été **archivé le 1er septembre 2026** : plus aucune version,
+plus aucun correctif de sécurité. La version déployée, `v2.63.23`, est la
+dernière. Quatre avis de sécurité la concernent **sans correctif disponible**,
+dont un de gravité *high* :
+
+- `GHSA-c4fr-5f24-4wrj` *(high)* — le nettoyage après échec d'un téléversement
+  supprime récursivement des dossiers, en contournant `Perm.Delete`. **C'est un
+  risque de perte de données sur les uploads de production**, déclenchable par
+  un simple envoi qui échoue.
+- `GHSA-39cx-23x9-5c8p` *(medium)* — WebSocket de commandes sans borne avant
+  contrôle des droits. Atténué : `disableExec` est actif et le compte admin a
+  `Execute: false`.
+- `GHSA-448h-jr2h-3vhp` *(medium)* — épuisement mémoire à la conversion de
+  sous-titres. Atténué par `mem_limit: 512m`.
+- `GHSA-7w29-q235-57m9` *(medium)* — les alias symboliques contournent les
+  règles de refus de chemin. Sans objet ici : aucune règle de refus n'est
+  utilisée.
+
+L'exposition reste faible — l'accès exige une clé SSH — mais le premier point
+est un risque d'exploitation, pas d'intrusion. À arbitrer : conserver en
+connaissance de cause, monter les uploads de production en lecture seule, ou
+remplacer par un outil maintenu.
+
+### Ce qu'il ne faut pas casser
+
+**Les réseaux porteurs.** Depuis Docker 28, un conteneur rattaché uniquement à
+des réseaux `internal` **ne publie plus aucun port**, et le refus est
+silencieux : le conteneur démarre, passe `healthy`, et rien n'écoute. Vérifié
+sur ce VPS en Docker 29.6.1. `EnableUserlandProxy` n'y change rien.
+
+Les réseaux `production_internal` et `staging_internal` étant `internal`, chaque
+stack déclare donc un second réseau, dit *porteur*, non `internal`, dont le seul
+rôle est de porter la publication du port :
+
+`adminer_porteur_production`, `adminer_porteur_staging`, `filebrowser_porteur`
+
+Chacun est créé avec `enable_ip_masquerade=false`, ce qui lui retire le NAT
+sortant : les trois conteneurs n'ont **aucun accès Internet**. C'est délibéré —
+ni Adminer, qui parle à la base de production, ni File Browser, qui écrit dans
+les uploads, ne doivent disposer d'un canal de sortie.
+
+> **Ne jamais recréer ces réseaux à la main.** Compose ne recrée pas un réseau
+> existant : un `docker network create adminer_porteur_production` sans l'option
+> produirait un réseau d'apparence identique, les conteneurs démarreraient
+> normalement, et l'accès Internet reviendrait sans le moindre message. Pour
+> corriger, supprimer le réseau puis relancer la stack.
+
+`scripts/diff-vps.sh` contrôle cet invariant sur tout réseau dont le nom
+contient « porteur », et sort en code 3 si le NAT a été réactivé.
+
+**Le `down` des stacks applicatives.** Un `docker compose down` dans
+`/opt/alivaon/production` ou `/opt/alivaon/staging` échoue désormais à supprimer
+son réseau (« network has active endpoints »), l'instance Adminer y étant
+attachée. Les conteneurs de la stack s'arrêtent normalement ; seul le réseau
+survit. Pour un `down` complet, arrêter d'abord l'instance Adminer.
+
+**Le préfixe `127.0.0.1:`** dans chaque mapping de port, pour la même raison que
+sur Portainer : Docker inscrit ses règles DNAT dans la chaîne iptables `DOCKER`,
+évaluée **avant** UFW. Sans ce préfixe, les ports 8081, 8082 et 8083 seraient
+joignables depuis Internet bien qu'UFW soit actif.
+
+Contrôle, à tout moment :
+
+```bash
+ssh alivaon "ss -tln | grep -E ':808[123] '"
+# Les trois lignes doivent porter 127.0.0.1, jamais 0.0.0.0 ni [::]
+```
 
 ---
 

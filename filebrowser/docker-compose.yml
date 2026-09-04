@@ -1,0 +1,133 @@
+# Stack File Browser (gestion des fichiers téléversés par l'application).
+# Déployée dans /opt/alivaon/filebrowser/, selon la convention du VPS
+# (un répertoire par stack, docker-compose.yml à sa racine).
+#
+# Accès strictement local, sur le modèle de Portainer et d'Adminer : aucun label
+# Traefik, aucun sous-domaine, publication sur la loopback uniquement, accès par
+# tunnel SSH.
+#
+#   127.0.0.1:8082  ->  File Browser
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# PÉRIMÈTRE : DEUX VOLUMES, ET RIEN D'AUTRE
+#
+# La racine exposée n'est PAS /opt/alivaon. Seuls les deux volumes d'uploads
+# applicatifs sont montés. Exposer /opt/alivaon aurait mis derrière une
+# interface web les fichiers .env de production et de préprod
+# (MYSQL_ROOT_PASSWORD, APP_SECRET, MAILER_DSN) ainsi que
+# traefik/letsencrypt/acme.json, qui contient les CLÉS PRIVÉES TLS des domaines
+# servis. Le mot de passe File Browser serait alors devenu, de fait, un secret
+# de même niveau que la racine de l'infrastructure.
+#
+# Les volumes `production_cv_private` et `staging_cv_private_staging` sont
+# délibérément ABSENTS, même en lecture seule : ce sont les CV déposés par les
+# candidats, donc des données personnelles. Rien ne justifie de les rendre
+# manipulables depuis une interface de confort.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  filebrowser:
+    # Version figée, comme les autres stacks.
+    #
+    # Variante `-s6` et non l'image nue : c'est une construction linuxserver.io,
+    # la seule des deux qui honore réellement PUID/PGID. L'image nue ignore ces
+    # variables et impose de passer par `user:`.
+    #
+    # digest manifest-list : sha256:ee4ac79e52966a5f6247f99c7d667c1debfb277a3a61ab829f505aa8f4c74b21
+    image: filebrowser/filebrowser:v2.63.23-s6
+    container_name: filebrowser
+    restart: unless-stopped
+
+    # IMPÉRATIF : le préfixe 127.0.0.1 restreint la publication à la loopback.
+    # Sans lui, Docker insère une règle DNAT dans la chaîne iptables DOCKER,
+    # évaluée AVANT les règles d'UFW : le port serait joignable depuis Internet
+    # bien qu'UFW soit actif et n'autorise que 22/80/443. Ne jamais le retirer.
+    ports:
+      - "127.0.0.1:8082:80"
+
+    environment:
+      # 82:82, et non 1000:1000 comme le reste de /opt/alivaon. C'est l'uid de
+      # `www-data` dans l'image Alpine de l'application : les fichiers des deux
+      # volumes d'uploads lui appartiennent, et leurs dossiers sont en 0755.
+      #
+      # Avec 1000:1000, File Browser aurait été LECTURE SEULE en pratique — ni
+      # envoi, ni renommage, ni suppression dans 7 des 9 dossiers. Et tout
+      # fichier qu'il aurait malgré tout créé aurait appartenu à un uid étranger
+      # à Symfony, donc ingérable par l'application.
+      #
+      # 82:82 aligne l'outil sur le producteur légitime des fichiers.
+      PUID: "82"
+      PGID: "82"
+      TZ: "Europe/Paris"
+
+    volumes:
+      # Persistance : database.db (comptes, réglages) et settings.json (port,
+      # adresse, racine). Le même dossier hôte est monté aux deux emplacements
+      # attendus par l'image, pour tout regrouper dans data/.
+      - ./data:/database
+      - ./data:/config
+      # Les deux volumes applicatifs, montés SOUS la racine /srv.
+      - production_uploads:/srv/production-uploads
+      - staging_uploads:/srv/staging-uploads
+
+    networks:
+      # Réseau porteur dédié, sans NAT sortant. Même raison que pour Adminer :
+      # depuis Docker 28, un conteneur sans réseau non-`internal` ne publie
+      # aucun port, et `enable_ip_masquerade=false` retire malgré tout l'accès
+      # Internet. Un gestionnaire de fichiers ayant un accès en écriture aux
+      # uploads de production ne doit disposer d'aucun canal de sortie.
+      - porteur
+
+    # L'init s6 démarre en root pour ajuster les droits, puis abandonne ses
+    # privilèges vers l'uid 82. On ne conserve que les capacités nécessaires à
+    # cette bascule ; tout le reste est retiré. Jeu minimal établi par essais
+    # successifs, pas par recopie d'un exemple.
+    #
+    # NET_BIND_SERVICE mérite un mot : /bin/filebrowser porte la capacité de
+    # FICHIER `cap_net_bind_service=ep`, qui lui permet d'écouter sur le port 80
+    # sous l'uid 82. Or `execve` sur un binaire à capacités de fichier échoue
+    # avec EPERM si cette capacité est absente du *bounding set* du conteneur.
+    # Sans elle, s6 échoue non pas à écouter mais à LANCER le binaire :
+    #   s6-applyuidgid: fatal: unable to exec filebrowser: Operation not permitted
+    # Message trompeur, la cause est ici. SETFCAP, elle, est inutile (vérifié).
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+
+    # L'image fournit son propre healthcheck (/healthcheck.sh -> GET /health).
+    # Il est conservé tel quel ; le redéfinir ici n'apporterait rien.
+
+networks:
+  porteur:
+    name: filebrowser_porteur
+    driver: bridge
+    driver_opts:
+      # NE JAMAIS RECRÉER CE RÉSEAU À LA MAIN. Un `docker network create
+      # filebrowser_porteur` sans cette option produirait un réseau d'apparence
+      # identique mais avec NAT sortant, rendant Internet joignable depuis le
+      # conteneur — sans le moindre message d'erreur. Le contrôle automatique
+      # se trouve dans scripts/diff-vps.sh.
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  # Volumes détenus par les stacks production et staging. `external: true` :
+  # cette stack s'y rattache, elle ne les crée ni ne les supprime jamais.
+  # Un `docker compose down -v` ici ne peut donc pas détruire les uploads.
+  production_uploads:
+    external: true
+    name: production_uploads
+  staging_uploads:
+    external: true
+    name: staging_uploads_staging
