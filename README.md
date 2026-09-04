@@ -234,6 +234,34 @@ sans que la cause soit visible dans les journaux Docker.
 
 ---
 
+## Vérifier que le dépôt est toujours fidèle au serveur
+
+Rien ne garantit que la photographie le reste : une modification faite en direct
+sur le VPS, ou un commit non déployé, créent un écart silencieux.
+
+```bash
+./scripts/diff-vps.sh        # comparaison par empreinte sha256
+./scripts/diff-vps.sh -v     # affiche le diff des fichiers qui divergent
+```
+
+À lancer **depuis le poste**, pas depuis le VPS : la comparaison suppose d'avoir
+les deux côtés sous la main. Le serveur ne connaît pas le contenu du dépôt, et y
+cloner un dépôt privé demanderait d'y déposer des identifiants GitHub — ce que
+cette infrastructure évite délibérément.
+
+Seuls les 6 fichiers copiés du serveur sont comparés ; les autres (README,
+`docs/`, `scripts/`, `.env.example`) n'existent que dans le dépôt.
+
+Pour un contrôle manuel, la partie serveur se réduit à :
+
+```bash
+ssh alivaon 'sha256sum /opt/alivaon/first-deploy.sh \
+  /opt/alivaon/traefik/docker-compose.yml /opt/alivaon/traefik/traefik.yml \
+  /opt/alivaon/production/docker-compose.yml \
+  /opt/alivaon/staging/docker-compose.yml \
+  /opt/alivaon/portainer/docker-compose.yml'
+```
+
 ## Chantiers ouverts
 
 ### Écarts documentaires hérités du premier commit
