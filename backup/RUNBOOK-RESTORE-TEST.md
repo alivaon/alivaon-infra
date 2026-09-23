@@ -28,6 +28,40 @@ Valeurs relevées au fil du test, à noter au brouillon :
 
 ---
 
+## Avant toute restauration : conteneur applicatif et mode des fichiers
+
+Deux choix que `restore.sh` n'accepte plus de faire implicitement.
+
+**Le conteneur applicatif ne tourne pas pendant l'écriture.** `restore.sh`
+réécrit les volumes depuis l'hôte, avec rsync. Si l'application tourne, un
+téléversement concurrent peut être écrasé, ou l'état obtenu mêler deux
+moments. S'il tourne, `restore.sh` **refuse** et dit quoi arrêter. Deux
+façons de procéder :
+
+- l'arrêter soi-même (`docker stop <conteneur>`) : `restore.sh` le laisse
+  arrêté à la fin, le redémarrer à la main ;
+- passer **`--stop-app`** : `restore.sh` l'arrête juste avant l'écriture et
+  le **redémarre** ensuite, **y compris en cas d'échec** (trap) ; l'état
+  initial est toujours rétabli.
+
+Le conteneur MySQL, lui, n'est jamais arrêté : la base est restaurée par
+import, à travers lui. La règle vaut pour toute écriture, base comprise : une
+application qui tourne pendant l'import écrirait dans une base à moitié
+recréée.
+
+**Le mode de restauration des fichiers est obligatoire** dès qu'un volume est
+restauré, sans valeur par défaut :
+
+| Mode | Effet | Quand |
+|---|---|---|
+| `--merge` | Les fichiers de la cible absents de l'instantané sont **conservés** ; ceux présents des deux côtés sont remplacés par la version archivée | **Corruption partielle** des fichiers, base saine : on remet ce qui manque ou a été abîmé, sans perdre les téléversements récents que la base actuelle référence |
+| `--mirror` | État **exact** de l'instantané : les fichiers absents de l'instantané sont **supprimés**. Leur nombre est annoncé et doit être confirmé (`SUPPRIMER <n>`) | **Perte totale du serveur** (volumes neufs : rien à conserver) ; retour complet base + fichiers à un instant donné ; **test de restauration sur le staging**, qui doit être déterministe |
+
+Détail et commandes par scénario : README, « Choisir le mode de restauration
+des fichiers ».
+
+---
+
 ## Test 0 — Ouvrir le dépôt depuis le Mac
 
 Le scénario couvert : le VPS a disparu, avec `/etc/alivaon-backup/`. Il ne
@@ -205,19 +239,33 @@ curl -s -o /dev/null -w '%{http_code}\n' --netrc-file ~/.alivaon-staging.netrc '
 ### 1.7 — Restaurer [VPS]
 
 ```bash
-time sudo /usr/local/lib/alivaon-backup/restore.sh --target staging --snapshot <ID_INSTANTANE> --no-safety-snapshot
+time sudo /usr/local/lib/alivaon-backup/restore.sh --target staging --snapshot <ID_INSTANTANE> --no-safety-snapshot --stop-app --mirror
 ```
 
-**Effet** : vérifie l'instantané, extrait dump et fichiers, affiche le
-récapitulatif, puis demande de taper `RESTAURER staging <ID_INSTANTANE>`.
-Ensuite : arrêt de `staging-app-1`, recréation de la base, synchronisation des
-volumes, redémarrage, attente de l'état `healthy`.
-`--no-safety-snapshot` : la base ayant été supprimée, il n'y a rien à archiver,
-et l'instantané de référence est celui de l'étape 1.1. Hors test, ne pas
-utiliser cette option.
-**Vérifier** : dernière ligne `restauration terminée : staging <- <ID_INSTANTANE>`.
-Noter la durée `real` affichée par `time` : c'est le **temps de restauration**
-observé, saisie de la confirmation comprise.
+**Effet** : vérifie l'instantané, contrôle que les volumes y appartiennent à
+`STAGING_APP_OWNER`, affiche le récapitulatif, puis demande deux phrases :
+`RESTAURER staging <ID_INSTANTANE>`, puis `SUPPRIMER <n>`, où `<n>` est le
+nombre annoncé de fichiers présents sur le staging et absents de
+l'instantané. Ensuite : arrêt de `staging-app-1`, recréation de la base,
+synchronisation des volumes, **vérification du propriétaire et des droits de
+chaque fichier restauré**, redémarrage, attente de l'état `healthy`.
+
+- `--stop-app` : `staging-app-1` tourne ; sans cette option, `restore.sh`
+  refuse. C'est le changement par rapport aux versions précédentes, où
+  l'arrêt était implicite.
+- `--mirror` : un test doit reproduire exactement l'instantané. `<n>` vaut
+  normalement **0** : l'étape 1.5 a *supprimé* un fichier, elle n'en a pas
+  ajouté. Un `<n>` non nul signale des téléversements survenus sur le staging
+  depuis l'étape 1.1 : les noter avant de confirmer.
+- `--no-safety-snapshot` : la base ayant été supprimée, il n'y a rien à
+  archiver, et l'instantané de référence est celui de l'étape 1.1. Hors test,
+  ne pas utiliser cette option.
+
+**Vérifier** : une ligne `volume 'uploads' : propriétaire, groupe et droits
+conformes à l'instantané` (et de même pour `cv_private`), puis la dernière
+ligne `restauration terminée : staging <- <ID_INSTANTANE>`. Noter la durée
+`real` affichée par `time` : c'est le **temps de restauration** observé,
+saisie des confirmations comprise.
 
 ### 1.8 — Contrôles serveur [VPS]
 
@@ -262,6 +310,26 @@ curl -s --netrc-file ~/.alivaon-staging.netrc 'https://www.staging.alivaon.com/u
 ./scripts/check-staging-auth.sh
 ```
 
+**Écriture réelle.** Afficher une image ne prouve que la lecture. Le défaut
+typique d'une restauration (fichiers au mauvais propriétaire) ne se révèle
+qu'à l'écriture, parfois des heures plus tard, sous une forme qui ne ressemble
+pas à un problème de restauration. D'où ce critère :
+
+**[NAVIGATEUR]** Sur `https://www.staging.alivaon.com`, téléverser une image
+par un formulaire de l'application qui en accepte une (image d'article, par
+exemple). **Vérifier** : l'enregistrement réussit, sans message d'erreur, et
+l'image s'affiche.
+
+**[VPS]**
+
+```bash
+docker exec staging-app-1 find /var/www/html/public/uploads -type f -mmin -15 -exec stat -c '%u:%g %a %n' {} +
+```
+
+**Effet** : liste les fichiers écrits dans le volume ces 15 dernières minutes.
+**Vérifier** : au moins une ligne, celle de l'image téléversée, appartenant à
+`82:82` (`STAGING_APP_OWNER`). Aucune ligne : l'application n'a pas pu écrire.
+
 | # | Critère | Attendu | ✓ |
 |---|---|---|---|
 | C1 | `restore.sh` s'est terminé sans erreur | `restauration terminée` | ☐ |
@@ -271,8 +339,9 @@ curl -s --netrc-file ~/.alivaon-staging.netrc 'https://www.staging.alivaon.com/u
 | C5 | L'image est identique à l'original | empreinte = `<EMPREINTE>` | ☐ |
 | C6 | Le schéma est complet | `<N_TABLES>` tables | ☐ |
 | C7 | La protection du staging est intacte | `check-staging-auth.sh` : `401`, code 0 | ☐ |
+| C8 | L'application **écrit** dans le volume restauré | téléversement réussi, fichier présent, `82:82` | ☐ |
 
-**Test réussi si et seulement si C1 à C7 sont tous cochés.**
+**Test réussi si et seulement si C1 à C8 sont tous cochés.**
 
 ```bash
 rm ~/.alivaon-staging.netrc
@@ -285,9 +354,14 @@ rm ~/.alivaon-staging.netrc
 - `restore.sh` s'est arrêté **avant** l'écriture (`abandonnée AVANT toute
   écriture`) : la cause est dans le journal affiché. Le staging est resté dans
   son état saboté : corriger, puis relancer 1.7.
-- `restore.sh` s'est arrêté **pendant** l'écriture : `staging-app-1` est laissé
-  arrêté à dessein. Corriger, relancer 1.7 : la restauration est complète et
-  rejouable.
+- `restore.sh` s'est arrêté **pendant** l'écriture : `staging-app-1` a été
+  redémarré par le trap (retour à l'état initial), mais le staging est dans
+  un état intermédiaire. Corriger, relancer 1.7 : la restauration est
+  complète et rejouable.
+- Écart de propriété ou de droits signalé en fin de restauration, ou C8 en
+  échec : comparer avec la référence de l'étape 2 de RUNBOOK-BACKUP (UID/GID
+  des processus PHP-FPM et des volumes). Ne pas corriger par un `chown` à la
+  main sans avoir compris l'écart : il signale un défaut de la chaîne.
 - C2 à C5 échouent alors que C1 est vert : `docker logs staging-app-1`. Si
   l'image applicative est plus récente que l'instantané :
   `docker exec staging-app-1 php bin/console doctrine:migrations:status`.

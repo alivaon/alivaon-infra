@@ -241,17 +241,36 @@ au jour le jour, c'est healthchecks.io qui détecte une sauvegarde manquante.
 # Inventaire
 sudo /usr/local/lib/alivaon-backup/restore.sh --list --target production
 
-# Restauration complète (base + fichiers) d'un instantané donné
-sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot <ID>
+# Retour complet (base + fichiers) à un instantané donné
+sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot <ID> --stop-app --mirror
 
-# Fichiers seulement, dernier instantané planifié
-sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --only uploads
+# Fichiers abîmés ou effacés, base saine : dernier instantané, récents conservés
+sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --only uploads --stop-app --merge
 ```
 
 Avant d'écraser, `restore.sh` archive l'état courant de la cible
 (`kind:pre-restore`) et affiche son identifiant : c'est le retour arrière.
-Le conteneur applicatif est arrêté pendant l'écriture, puis redémarré par
-`docker start`, sans passer par `docker compose up`.
+
+**Conteneur applicatif.** Aucune écriture n'a lieu pendant qu'il tourne :
+rsync réécrit les volumes depuis l'hôte, et un téléversement concurrent
+pourrait être écrasé ou produire un état mêlant deux moments. S'il tourne,
+`restore.sh` refuse et dit quoi arrêter, sauf **`--stop-app`** : il est alors
+arrêté juste avant l'écriture et **redémarré ensuite, même en cas d'échec**
+(trap), par `docker start`, jamais `docker compose up`. Arrêté au départ, il
+reste arrêté. Le conteneur MySQL n'est jamais arrêté : la base est restaurée
+par import, à travers lui.
+
+**Propriété et droits.** Les fichiers doivent appartenir à l'UID sous lequel
+PHP-FPM écrit (`<ENV>_APP_OWNER`, `82:82`), sans quoi la restauration paraît
+réussie et le premier téléversement échoue plus tard. La chaîne conserve les
+UID/GID **numériques** de bout en bout : `restic backup` et `restic restore`
+en root, puis `rsync -aH --numeric-ids` en root. `restore.sh` le vérifie :
+
+- **avant** l'écriture, la racine de chaque volume doit, dans l'instantané,
+  appartenir à `<ENV>_APP_OWNER` ; sinon refus, rien n'est modifié ;
+- **après** l'écriture, propriétaire, groupe et droits de **chaque** fichier
+  restauré sont comparés à ceux enregistrés dans l'instantané ; au moindre
+  écart, échec avec la liste des fichiers en cause.
 
 | Règle | Comportement |
 |---|---|
@@ -260,6 +279,25 @@ Le conteneur applicatif est arrêté pendant l'écriture, puis redémarré par
 | Étiquette et manifeste discordants | Refus, code 3 |
 | Pas de terminal | Refus : la confirmation est toujours interactive |
 | Volume absent, ou pilote autre que `local` (H9) | Refus, avant toute écriture |
+| Conteneur applicatif en marche, sans `--stop-app` | Refus, avant toute écriture, avec la commande d'arrêt à lancer |
+| Volume à restaurer sans `--merge` ni `--mirror` | Refus : aucun mode par défaut |
+| `--mirror` | Nombre de fichiers à supprimer annoncé, seconde phrase à taper (`SUPPRIMER <n>`) ; refus si ce nombre change avant l'écriture |
+| Volumes de l'instantané à un autre UID que `<ENV>_APP_OWNER` | Refus, avant toute écriture |
+| Propriétaire ou droits restaurés différents de l'instantané | Échec en fin de restauration, fichiers en cause listés |
+
+### Choisir le mode de restauration des fichiers
+
+Sans `--delete`, les fichiers créés après l'instantané survivent, et l'état
+obtenu mêle deux moments. Avec `--delete`, les téléversements récents sont
+perdus. Les deux se défendent selon le scénario : le choix est donc
+**obligatoire** dès qu'un volume est restauré.
+
+| Scénario | Mode | Commande | Pourquoi |
+|---|---|---|---|
+| **Perte totale du serveur** | `--mirror` | `--target production --snapshot latest --stop-app --mirror --no-safety-snapshot` | Les volumes sont neufs, il n'y a rien à conserver : l'objectif est l'état exact de l'instantané. Décompte attendu : 0, ou les quelques fichiers déposés par l'image au premier démarrage |
+| **Corruption partielle** des fichiers, base saine | `--merge` | `--target production --snapshot <ID> --only uploads --stop-app --merge` | Remet ce qui manque ou a été abîmé, sans supprimer les téléversements récents, que la base actuelle référence. Un fichier présent des deux côtés reprend la version archivée : choisir un instantané antérieur à la corruption |
+| Corruption de la base, retour complet à un instant donné | `--mirror` | `--target production --snapshot <ID> --stop-app --mirror` | La base revient à l'instant de l'instantané ; les fichiers postérieurs n'y seraient plus référencés. Le décompte annoncé dit combien de téléversements seront perdus |
+| **Test de restauration sur le staging** | `--mirror` | voir RUNBOOK-RESTORE-TEST.md, test 1 | Un test doit être déterministe : rien d'hérité de la cible |
 
 ### Perte totale du VPS
 
@@ -274,7 +312,7 @@ Le conteneur applicatif est arrêté pendant l'écriture, puis redémarré par
    **ne jamais lancer `init`**.
 3. **Ne pas activer les timers** (étape 10) avant la restauration. Une
    sauvegarde d'un serveur vide prendrait place dans la rétention.
-4. `sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --no-safety-snapshot`
+4. `sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --no-safety-snapshot --stop-app --mirror`
 5. Vérifier le site, puis faire de même avec `--target staging`.
 6. Étapes 8 à 10 du runbook : sauvegarde manuelle, contrôle des unités,
    timers.
@@ -389,6 +427,16 @@ vider par `rsync --delete`. Rien de cela n'est codé.
 ---
 
 ## Limites connues
+
+- **ACL et attributs étendus non restaurés.** rsync tourne en `-a`, sans `-A`
+  ni `-X` : propriétaire, groupe et droits Unix sont restaurés et vérifiés,
+  pas les ACL. Hypothèse H11 : les volumes n'en portent pas (l'application
+  n'en pose pas, et rien dans les compose ne le suggère).
+- **Vérification de propriété limitée à ce que l'instantané enregistre.** Si
+  les fichiers archivés appartenaient déjà au mauvais UID, `restore.sh` le
+  reproduit fidèlement ; seul le contrôle de la racine contre
+  `<ENV>_APP_OWNER`, et le téléversement réel du test 1 (critère C8), le
+  détectent.
 
 - **Un VPS compromis détient la clé d'écriture sur le dépôt.** Mitigation :
   instantanés de la Storage Box, obligatoires (voir en tête). Sur S3, activer

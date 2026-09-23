@@ -180,9 +180,11 @@ validate_config() {
   ((${#envs[@]} > 0)) || die "BACKUP_ENVIRONMENTS est vide"
   for env in "${envs[@]}"; do
     is_known_env "$env" || die "environnement inconnu dans BACKUP_ENVIRONMENTS : '$env' (admis : $(join_by ' ' "${ALIVAON_KNOWN_ENVS[@]}"))"
-    for v in DB_CONTAINER DB_NAME DB_USER DB_PASSWORD BACKUP_DB_USER BACKUP_DB_PASSWORD APP_CONTAINER VOLUMES; do
+    for v in DB_CONTAINER DB_NAME DB_USER DB_PASSWORD BACKUP_DB_USER BACKUP_DB_PASSWORD APP_CONTAINER APP_OWNER VOLUMES; do
       [[ -n $(env_get "$env" "$v") ]] || die "variable ${env^^}_$v manquante ou vide dans la configuration"
     done
+    [[ $(env_get "$env" APP_OWNER) =~ ^[0-9]+:[0-9]+$ ]] ||
+      die "${env^^}_APP_OWNER : format attendu uid:gid numériques (ex. 82:82), constaté à l'étape 2 du runbook"
     [[ $(env_get "$env" DB_NAME) =~ ^[A-Za-z0-9_]+$ ]] ||
       die "${env^^}_DB_NAME : caractères admis A-Z a-z 0-9 _"
     IFS=' ' read -r -a specs <<<"$(env_get "$env" VOLUMES)"

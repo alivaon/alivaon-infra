@@ -14,5 +14,10 @@ case $1 in
     echo "snapshot 1a2b3c4d saved"
     ;;
   dump) cat "$TEST_ROOT/restic/dump" ;;
+  ls)
+    # Dernier argument : le chemin demandé ; réponse (JSON lines) dans
+    # $TEST_ROOT/restic/ls.json.
+    cat "$TEST_ROOT/restic/ls.json"
+    ;;
   *) ;;
 esac

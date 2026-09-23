@@ -2,13 +2,17 @@
 # Simulacre de docker pour tests/run.sh.
 #   exec -i CONTENEUR CMD...   exécute CMD localement, les simulacres du
 #                              « conteneur » (mysqldump, mysql) en tête du PATH
-#   inspect ...                conteneur en marche
+#   inspect [-f FORMAT] NOM    état lu dans $TEST_ROOT/containers/NOM (true ou
+#                              false ; absent = true, conteneur en marche)
+#   stop NOM, start NOM        changent cet état et sont consignés dans
+#                              $TEST_ROOT/log/docker
 #   volume inspect -f '{{.Driver}} {{.Mountpoint}}' NOM
 #                              « local $TEST_ROOT/volumes/NOM » ; le pilote est
 #                              lu dans $TEST_ROOT/volumes/NOM.driver s'il existe.
 #                              Volume absent (dossier inexistant) : code 1.
 set -euo pipefail
 : "${TEST_ROOT:?variable posée par tests/run.sh}" "${TEST_MOCKS:?variable posée par tests/run.sh}"
+state_dir=$TEST_ROOT/containers
 case $1 in
   exec)
     shift
@@ -16,7 +20,27 @@ case $1 in
     shift # nom du conteneur
     PATH="$TEST_MOCKS/container:$PATH" exec "$@"
     ;;
-  inspect) echo true ;;
+  inspect)
+    shift
+    fmt=''
+    if [[ $1 == -f ]]; then
+      fmt=$2
+      shift 2
+    fi
+    running=true
+    if [[ -f $state_dir/$1 ]]; then running=$(<"$state_dir/$1"); fi
+    case $fmt in
+      *Health*) if [[ $running == true ]]; then echo healthy; else echo exited; fi ;;
+      *Running*) echo "$running" ;;
+      *) echo '[]' ;;
+    esac
+    ;;
+  stop | start)
+    mkdir -p "$state_dir"
+    if [[ $1 == start ]]; then echo true >"$state_dir/$2"; else echo false >"$state_dir/$2"; fi
+    printf '%s %s\n' "$1" "$2" >>"$TEST_ROOT/log/docker"
+    echo "$2"
+    ;;
   volume)
     name=${!#}
     [[ -d $TEST_ROOT/volumes/$name ]] || { echo "Error: no such volume: $name" >&2; exit 1; }

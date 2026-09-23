@@ -14,23 +14,43 @@
 #      contient la cible et l'identifiant de l'instantané. Pas de mode forcé.
 #   5. L'état courant de la cible est archivé (kind:pre-restore) juste avant
 #      l'écrasement, sauf --no-safety-snapshot.
+#   6. Le conteneur applicatif ne doit pas tourner pendant l'écriture : refus
+#      s'il tourne, sauf --stop-app (voir ci-dessous).
+#   7. Mode de restauration des fichiers OBLIGATOIRE dès qu'un volume est
+#      restauré, sans valeur par défaut : --merge ou --mirror. En --mirror, le
+#      nombre de fichiers qui seront supprimés est annoncé et doit être
+#      confirmé par une seconde phrase tapée.
+#   8. Propriété et droits : le propriétaire des volumes dans l'instantané doit
+#      être celui sous lequel l'application écrit (<ENV>_APP_OWNER), vérifié
+#      AVANT l'écriture ; après l'écriture, propriétaire et droits de chaque
+#      fichier restauré sont comparés à ceux de l'instantané.
 #
 # CE QUI EST ÉCRASÉ
 #   db      la base est SUPPRIMÉE puis recréée depuis le dump (DROP DATABASE).
-#   <rôle>  chaque volume (uploads, cv_private...) est synchronisé avec
-#           rsync --delete : les fichiers absents de l'instantané disparaissent.
-#   Le conteneur applicatif est arrêté pendant l'écriture, puis redémarré par
-#   `docker start` — jamais `docker compose up`, qui réinterpolerait les labels
-#   (voir le piège STAGING_BASICAUTH dans le README racine).
+#   <rôle>  chaque volume (uploads, cv_private...) est synchronisé par rsync,
+#           UID/GID numériques et droits préservés (-a --numeric-ids, en root) :
+#           --merge   les fichiers absents de l'instantané sont CONSERVÉS ;
+#           --mirror  ils sont SUPPRIMÉS (état exact de l'instantané).
+#
+# CONTENEUR APPLICATIF
+#   Aucune écriture n'a lieu pendant qu'il tourne : un téléversement concurrent
+#   serait écrasé, ou produirait un état mêlant deux moments. S'il tourne,
+#   restore.sh refuse, sauf --stop-app : il est alors arrêté juste avant
+#   l'écriture et REDÉMARRÉ ensuite, y compris en cas d'échec (trap EXIT), pour
+#   revenir à l'état initial. Arrêté au départ, il reste arrêté. Le redémarrage
+#   passe par `docker start`, jamais `docker compose up`, qui réinterpolerait
+#   les labels (piège STAGING_BASICAUTH, README racine). Le conteneur MySQL,
+#   lui, n'est jamais arrêté : la base est restaurée par import, à travers lui.
 #
 # UTILISATION (sur le VPS, en root, dans un terminal)
 #   restore.sh --list [--target ENV]
-#   restore.sh --target ENV --snapshot ID|latest [--only db,uploads,...]
-#              [--allow-production-to-staging] [--no-safety-snapshot]
+#   restore.sh --target ENV --snapshot ID|latest --merge|--mirror [--stop-app]
+#              [--only db,uploads,...] [--allow-production-to-staging]
+#              [--no-safety-snapshot]
 #
 # CODES DE SORTIE
-#   0  restauration terminée, application redémarrée
-#   1  échec ; le journal dit si la cible a été modifiée ou non
+#   0  restauration terminée, conteneur applicatif revenu à son état initial
+#   1  échec ou refus ; le journal dit si la cible a été modifiée ou non
 #   3  refus de sécurité (environnements incompatibles)
 #
 # shellcheck source-path=SCRIPTDIR
@@ -48,19 +68,23 @@ ONLY=''
 ALLOW_P2S=0
 SAFETY=1
 LIST=0
+STOP_APP=0
+VOLUME_MODE='' # merge | mirror : jamais de valeur par défaut
 
 CLEANUP_DIRS=()
 WORK_DIR=''
 PHASE='prepare' # prepare -> safety -> prepare -> write -> done
 APP_CONTAINER=''
-APP_STOPPED=0
+APP_OWNER=''
+APP_STOPPED_BY_US=0
 SAFETY_ID=''
+DEL_TOTAL=0
 
 SNAP_ID='' SNAP_SHORT='' SNAP_TIME='' SNAP_HOST='' SNAP_ENV=''
 SNAP_PATHS=()
 M_FORMAT='' M_ENV='' M_DB_NAME='' M_DB_FILE=''
 M_ROLES=()
-declare -A M_VOL=() M_MP=() T_VOL=() T_MP=()
+declare -A M_VOL=() M_MP=() T_VOL=() T_MP=() DEL_FILES=() DEL_DIRS=()
 T_DB_NAME='' T_DB_CONTAINER=''
 COMPONENTS=()
 
@@ -68,7 +92,22 @@ usage() {
   cat <<'EOF'
 Usage :
   restore.sh --list [--target production|staging]
-  restore.sh --target production|staging --snapshot ID|latest [options]
+  restore.sh --target production|staging --snapshot ID|latest
+             --merge|--mirror [--stop-app] [options]
+
+Mode de restauration des fichiers, OBLIGATOIRE dès qu'un volume est restauré :
+  --merge                         conserve les fichiers de la cible absents de
+                                  l'instantané (ceux présents des deux côtés
+                                  sont remplacés par la version archivée).
+  --mirror                        état exact de l'instantané : les fichiers
+                                  absents de l'instantané sont SUPPRIMÉS. Leur
+                                  nombre est annoncé et doit être confirmé.
+
+Conteneur applicatif :
+  --stop-app                      l'arrête juste avant l'écriture et le
+                                  redémarre ensuite, même en cas d'échec. Sans
+                                  cette option, restore.sh refuse de s'exécuter
+                                  s'il tourne.
 
 Options :
   --only LISTE                    composants à restaurer, séparés par des
@@ -92,6 +131,9 @@ EOF
 on_exit() {
   local rc=$?
   local d
+  # En premier : revenir à l'état initial du conteneur applicatif, quoi qu'il
+  # soit arrivé. Seul un conteneur arrêté PAR restore.sh est redémarré.
+  restart_app || true
   for d in "${CLEANUP_DIRS[@]}"; do
     rm -rf -- "$d"
   done
@@ -111,9 +153,7 @@ on_exit() {
         ;;
       write)
         error "restauration interrompue PENDANT l'écriture : '$TARGET' est dans un état intermédiaire."
-        if ((APP_STOPPED)); then
-          error "le conteneur $APP_CONTAINER est laissé ARRÊTÉ à dessein, pour qu'aucune écriture n'ait lieu sur une base incohérente."
-        fi
+        error "le conteneur applicatif a été remis dans son état initial ; ne pas considérer ses données comme cohérentes."
         if [[ -n $SAFETY_ID ]]; then
           error "retour à l'état précédent : restore.sh --target $TARGET --snapshot $SAFETY_ID --no-safety-snapshot"
         fi
@@ -124,6 +164,12 @@ on_exit() {
   exit "$rc"
 }
 
+set_volume_mode() {
+  [[ -z $VOLUME_MODE || $VOLUME_MODE == "$1" ]] ||
+    die "--merge et --mirror s'excluent : choisir l'un des deux"
+  VOLUME_MODE=$1
+}
+
 parse_args() {
   while (($# > 0)); do
     case $1 in
@@ -132,6 +178,9 @@ parse_args() {
       --only) ONLY=${2:-}; shift 2 || { usage; exit 1; } ;;
       --allow-production-to-staging) ALLOW_P2S=1; shift ;;
       --no-safety-snapshot) SAFETY=0; shift ;;
+      --stop-app) STOP_APP=1; shift ;;
+      --merge) set_volume_mode merge; shift ;;
+      --mirror) set_volume_mode mirror; shift ;;
       --list) LIST=1; shift ;;
       -h | --help) usage; exit 0 ;;
       *) usage; exit 1 ;;
@@ -238,6 +287,7 @@ load_target() {
   T_DB_NAME=$(env_get "$TARGET" DB_NAME)
   T_DB_CONTAINER=$(env_get "$TARGET" DB_CONTAINER)
   APP_CONTAINER=$(env_get "$TARGET" APP_CONTAINER)
+  APP_OWNER=$(env_get "$TARGET" APP_OWNER)
   IFS=' ' read -r -a specs <<<"$(env_get "$TARGET" VOLUMES)"
   for spec in "${specs[@]}"; do
     T_VOL[${spec%%=*}]=${spec#*=}
@@ -286,6 +336,213 @@ has_volumes() {
   return 1
 }
 
+# ── Mode de restauration des fichiers ────────────────────────────────────────
+
+check_volume_mode() {
+  if has_volumes; then
+    [[ -n $VOLUME_MODE ]] ||
+      die "mode de restauration des fichiers non précisé. Choisir explicitement : --merge (conserve les fichiers de la cible absents de l'instantané) ou --mirror (état exact de l'instantané : ces fichiers sont SUPPRIMÉS). Aucun mode par défaut ; voir README, « Choisir le mode de restauration des fichiers »."
+    info "mode de restauration des fichiers : --$VOLUME_MODE"
+  elif [[ -n $VOLUME_MODE ]]; then
+    warn "--$VOLUME_MODE sans effet : aucun volume à restaurer"
+  fi
+  return 0
+}
+
+# ── Conteneur applicatif ─────────────────────────────────────────────────────
+
+# Avant la confirmation : refus s'il tourne sans --stop-app.
+check_app_state() {
+  if container_running "$APP_CONTAINER"; then
+    ((STOP_APP)) ||
+      die "le conteneur applicatif $APP_CONTAINER tourne. Écrire pendant qu'il fonctionne produirait un état mêlant deux moments, et pourrait écraser un téléversement en cours. Au choix : l'arrêter soi-même (docker stop $APP_CONTAINER), ou relancer avec --stop-app, qui l'arrête juste avant l'écriture et le redémarre ensuite, même en cas d'échec. Le conteneur MySQL $T_DB_CONTAINER, lui, doit rester démarré."
+    info "$APP_CONTAINER tourne : il sera arrêté juste avant l'écriture, puis redémarré (--stop-app)"
+  else
+    info "$APP_CONTAINER est arrêté : il le restera après la restauration"
+  fi
+}
+
+# Juste avant l'écriture. Le conteneur a pu démarrer depuis check_app_state.
+stop_app_for_write() {
+  container_running "$APP_CONTAINER" || return 0
+  ((STOP_APP)) ||
+    die "$APP_CONTAINER a démarré depuis la vérification : refus, aucune donnée n'a été modifiée"
+  info "arrêt de $APP_CONTAINER (--stop-app)"
+  docker stop "$APP_CONTAINER" >/dev/null
+  APP_STOPPED_BY_US=1
+}
+
+# Ne redémarre QUE ce que restore.sh a arrêté. Appelé en fin de restauration et
+# par on_exit, donc aussi après un échec.
+restart_app() {
+  ((APP_STOPPED_BY_US)) || return 0
+  info "redémarrage de $APP_CONTAINER (retour à l'état initial)"
+  if docker start "$APP_CONTAINER" >/dev/null; then
+    APP_STOPPED_BY_US=0
+    return 0
+  fi
+  error "redémarrage de $APP_CONTAINER impossible : le démarrer à la main (docker start $APP_CONTAINER)"
+  return 1
+}
+
+# ── Contenu et métadonnées des volumes dans l'instantané ─────────────────────
+#
+# Pour chaque volume restauré, WORK_DIR/listing.<rôle> contient une ligne par
+# entrée de l'instantané : « uid gid mode chemin_relatif », le chemin relatif
+# de la racine du volume étant « . ». uid, gid et mode sont ceux enregistrés
+# par restic au moment de la sauvegarde : c'est la référence de propriété et
+# de droits.
+
+load_listings() {
+  local c
+  for c in "${COMPONENTS[@]}"; do
+    [[ $c == db ]] && continue
+    rstc ls --json "$SNAP_ID" "${M_MP[$c]}" | jq -r --arg mp "${M_MP[$c]}" '
+      select((.struct_type // .message_type) == "node")
+      | select(.path == $mp or (.path | startswith($mp + "/")))
+      | "\(.uid) \(.gid) \(.mode) \(if .path == $mp then "." else .path[($mp | length) + 1:] end)"' \
+      >"$WORK_DIR/listing.$c"
+    [[ -s $WORK_DIR/listing.$c ]] || die "volume '$c' vide ou illisible dans l'instantané $SNAP_SHORT"
+  done
+  return 0
+}
+
+# perm_of MODE_RESTIC — droits Unix (octal, sans zéro initial, comme stat %a)
+# d'un mode Go enregistré par restic. Les bits spéciaux y sont hors des 12 bits
+# bas : setuid 1<<23, setgid 1<<22, sticky 1<<20.
+perm_of() {
+  local mode=$1 perm
+  perm=$((mode & 8#777))
+  if (((mode >> 23) & 1)); then perm=$((perm | 8#4000)); fi
+  if (((mode >> 22) & 1)); then perm=$((perm | 8#2000)); fi
+  if (((mode >> 20) & 1)); then perm=$((perm | 8#1000)); fi
+  printf '%o' "$perm"
+}
+
+# AVANT l'écriture : la racine de chaque volume, dans l'instantané, doit
+# appartenir à l'utilisateur sous lequel l'application écrit. Sinon la
+# restauration paraîtrait réussie et le premier téléversement échouerait
+# plus tard (typiquement : image applicative reconstruite avec un autre UID).
+check_snapshot_owner() {
+  local c uid gid mode rel
+  for c in "${COMPONENTS[@]}"; do
+    [[ $c == db ]] && continue
+    while IFS=' ' read -r uid gid mode rel; do
+      [[ $rel == . ]] || continue
+      [[ $uid:$gid == "$APP_OWNER" ]] ||
+        die "propriété incompatible : dans l'instantané, la racine du volume '$c' appartient à $uid:$gid, l'application écrit sous $APP_OWNER (${TARGET^^}_APP_OWNER). Restauré tel quel, le premier téléversement échouerait. Vérifier ${TARGET^^}_APP_OWNER (RUNBOOK-BACKUP.md, étape 2) ; aucune donnée n'a été modifiée."
+    done <"$WORK_DIR/listing.$c"
+  done
+  return 0
+}
+
+# ── Fichiers qui seront supprimés en --mirror ────────────────────────────────
+
+# deletion_plan RÔLE — chemins relatifs présents sur la cible et absents de
+# l'instantané, c'est-à-dire exactement ce que rsync --delete supprimera.
+deletion_plan() {
+  local c=$1
+  LC_ALL=C comm -13 \
+    <(cut -d' ' -f4- "$WORK_DIR/listing.$c" | LC_ALL=C sort) \
+    <(cd -- "${T_MP[$c]}" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort)
+}
+
+count_deletions() {
+  local c p files dirs
+  DEL_TOTAL=0
+  for c in "${COMPONENTS[@]}"; do
+    [[ $c == db ]] && continue
+    files=0
+    dirs=0
+    while IFS= read -r p; do
+      if [[ -d ${T_MP[$c]}/$p && ! -L ${T_MP[$c]}/$p ]]; then
+        dirs=$((dirs + 1))
+      else
+        files=$((files + 1))
+      fi
+    done < <(deletion_plan "$c")
+    DEL_FILES[$c]=$files
+    DEL_DIRS[$c]=$dirs
+    DEL_TOTAL=$((DEL_TOTAL + files + dirs))
+  done
+  return 0
+}
+
+confirm_deletions() {
+  local expected="SUPPRIMER $DEL_TOTAL" answer c
+  printf '
+'
+  printf 'Mode --mirror : ce qui existe sur la cible et pas dans l'"'"'instantané sera SUPPRIMÉ.
+'
+  for c in "${COMPONENTS[@]}"; do
+    [[ $c == db ]] && continue
+    printf '  - %s : %s fichier(s) et %s dossier(s) à supprimer
+' "$c" "${DEL_FILES[$c]}" "${DEL_DIRS[$c]}"
+  done
+  printf '  Total : %s entrée(s)
+
+' "$DEL_TOTAL"
+  printf 'Pour confirmer la suppression, tapez exactement :  %s
+> ' "$expected"
+  IFS= read -r answer || die "lecture de la confirmation de suppression impossible"
+  [[ $answer == "$expected" ]] || die "confirmation de suppression incorrecte : aucune donnée n'a été modifiée"
+  info "suppression de $DEL_TOTAL entrée(s) confirmée"
+}
+
+# ── Synchronisation et vérification d'un volume ──────────────────────────────
+
+sync_volume() {
+  local c=$1 rc=0
+  # -a : -rlptgoD, dont -o -g (propriétaire, groupe) et -p (droits) ;
+  # --numeric-ids : UID/GID transmis tels quels, jamais traduits par nom (82
+  # n'a pas de nom sur l'hôte) ; -H : liens physiques. Exécuté en root, seul
+  # à pouvoir attribuer un propriétaire quelconque.
+  local -a opts=(-aH --numeric-ids)
+  if [[ $VOLUME_MODE == mirror ]]; then
+    opts+=(--delete)
+  fi
+  info "synchronisation $c -> ${T_MP[$c]} (--$VOLUME_MODE)"
+  # Échec traité explicitement, sans compter sur set -e : la fonction reste
+  # sûre quel que soit son contexte d'appel.
+  rsync "${opts[@]}" -- "$WORK_DIR/files${M_MP[$c]}/" "${T_MP[$c]}/" || rc=$?
+  ((rc == 0)) || die "rsync a échoué (code $rc) sur ${T_MP[$c]} : volume dans un état intermédiaire"
+}
+
+# APRÈS l'écriture : chaque entrée de l'instantané doit exister sur la cible
+# avec le même propriétaire, le même groupe et les mêmes droits ; la racine du
+# volume doit appartenir à l'utilisateur de l'application. En --merge, les
+# fichiers propres à la cible ne sont pas examinés.
+verify_volume() {
+  local c=$1
+  local dest=${T_MP[$c]} uid gid mode rel perm u g a name got want root line
+  local -a errs=()
+  local -A actual=()
+  while IFS=' ' read -r u g a name; do
+    name=${name#"$dest"}
+    name=${name#/}
+    actual[${name:-.}]="$u $g $a"
+  done < <(find "$dest" -exec stat -c '%u %g %a %n' {} +)
+
+  while IFS=' ' read -r uid gid mode rel; do
+    perm=$(perm_of "$mode")
+    want="$uid $gid $perm"
+    got=${actual[$rel]:-absent}
+    [[ $got == "$want" ]] || errs+=("$rel : attendu $uid:$gid $perm, obtenu ${got/ /:}")
+  done <"$WORK_DIR/listing.$c"
+
+  root=${actual[.]:-absente}
+  if [[ ${root% *} != "${APP_OWNER/:/ }" ]]; then
+    errs+=("racine du volume : ${root% *} au lieu de $APP_OWNER, l'utilisateur sous lequel l'application écrit")
+  fi
+
+  if ((${#errs[@]} > 0)); then
+    error "volume '$c' : ${#errs[@]} écart(s) de propriété ou de droits après restauration :"
+    printf '%s\n' "${errs[@]}" | head -n 10 | while IFS= read -r line; do error "  | $line"; done
+    die "propriété ou droits incorrects sur ${T_MP[$c]} : les fichiers sont restaurés mais le premier téléversement risque d'échouer"
+  fi
+  info "volume '$c' : propriétaire, groupe et droits conformes à l'instantané ($(wc -l <"$WORK_DIR/listing.$c" | tr -d ' ') entrées)"
+}
+
 check_space() {
   local need avail
   has_volumes || return 0
@@ -298,10 +555,12 @@ check_space() {
 
 # ── Confirmation ─────────────────────────────────────────────────────────────
 
+require_tty() {
+  [[ -t 0 ]] || die "pas de terminal : restore.sh exige un opérateur pour confirmer l'écrasement"
+}
+
 confirm() {
   local expected="RESTAURER $TARGET $SNAP_SHORT" answer c
-  [[ -t 0 ]] || die "pas de terminal : restore.sh exige un opérateur pour confirmer l'écrasement"
-
   printf '\n'
   printf '══════════════════════════════════════════════════════════════════\n'
   printf '  RESTAURATION — LES DONNÉES DE LA CIBLE VONT ÊTRE ÉCRASÉES\n'
@@ -313,10 +572,18 @@ confirm() {
       printf '  - base %s dans %s : SUPPRIMÉE puis recréée\n' "$T_DB_NAME" "$T_DB_CONTAINER"
     else
       printf '  - %s : %s (instantané) -> volume %s (%s)\n' "$c" "${M_VOL[$c]}" "${T_VOL[$c]}" "${T_MP[$c]}"
-      printf "    synchronisé, fichiers absents de l'instantané SUPPRIMÉS\n"
+      if [[ $VOLUME_MODE == mirror ]]; then
+        printf "    --mirror : %s fichier(s) et %s dossier(s) absents de l'instantané SUPPRIMÉS\n" "${DEL_FILES[$c]}" "${DEL_DIRS[$c]}"
+      else
+        printf "    --merge : fichiers absents de l'instantané CONSERVÉS\n"
+      fi
     fi
   done
-  printf "  Application: %s arrêtée pendant l'opération\n" "$APP_CONTAINER"
+  if container_running "$APP_CONTAINER"; then
+    printf "  Application: %s arrêtée pendant l'écriture, puis redémarrée\n" "$APP_CONTAINER"
+  else
+    printf '  Application: %s déjà arrêtée, le restera\n' "$APP_CONTAINER"
+  fi
   if ((SAFETY)); then
     printf '  Filet      : état actuel archivé (kind:pre-restore) avant écrasement\n'
   else
@@ -371,37 +638,43 @@ extract() {
 }
 
 write_target() {
-  local c
-  PHASE='write'
+  local c confirmed=$DEL_TOTAL
+  stop_app_for_write
 
-  if container_running "$APP_CONTAINER"; then
-    info "arrêt de $APP_CONTAINER"
-    docker stop "$APP_CONTAINER" >/dev/null
-    APP_STOPPED=1
+  # Le décompte confirmé est celui qui sera supprimé. Recalculé une fois
+  # l'application arrêtée : s'il a changé entre-temps (téléversement pendant
+  # la confirmation), refus, sans rien écrire.
+  if has_volumes && [[ $VOLUME_MODE == mirror ]]; then
+    count_deletions
+    ((DEL_TOTAL == confirmed)) ||
+      die "le nombre de fichiers à supprimer est passé de $confirmed à $DEL_TOTAL depuis la confirmation : refus, aucune donnée n'a été modifiée"
   fi
 
+  PHASE='write'
   for c in "${COMPONENTS[@]}"; do
     if [[ $c == db ]]; then
       info "import du dump dans $T_DB_CONTAINER (DROP puis CREATE DATABASE $T_DB_NAME)"
       db_run "$TARGET" restore "$DB_IMPORT_SCRIPT" <"$WORK_DIR/db.sql"
     else
-      info "synchronisation $c -> ${T_MP[$c]}"
-      rsync -aH --numeric-ids --delete -- "$WORK_DIR/files${M_MP[$c]}/" "${T_MP[$c]}/"
+      sync_volume "$c"
+      verify_volume "$c"
     fi
   done
 
-  info "démarrage de $APP_CONTAINER"
-  docker start "$APP_CONTAINER" >/dev/null
-  APP_STOPPED=0
-  wait_healthy "$APP_CONTAINER" 180 ||
-    die "$APP_CONTAINER n'est pas « healthy » après 180 s : données restaurées, application à diagnostiquer (docker logs $APP_CONTAINER)"
+  if ((APP_STOPPED_BY_US)); then
+    restart_app
+    wait_healthy "$APP_CONTAINER" 180 ||
+      die "$APP_CONTAINER n'est pas « healthy » après 180 s : données restaurées, application à diagnostiquer (docker logs $APP_CONTAINER)"
+  else
+    info "$APP_CONTAINER était arrêté au départ : laissé arrêté (docker start $APP_CONTAINER pour le démarrer)"
+  fi
   PHASE='done'
 }
 
 main() {
   parse_args "$@"
   require_root
-  require_cmds docker restic jq rsync flock base64 numfmt df
+  require_cmds docker restic jq rsync flock base64 numfmt df find comm stat
   load_config
   check_restic_version
 
@@ -426,8 +699,19 @@ main() {
   load_manifest
   load_target
   select_components
+  check_volume_mode
+  check_app_state
+  load_listings
+  check_snapshot_owner
+  if has_volumes && [[ $VOLUME_MODE == mirror ]]; then
+    count_deletions
+  fi
   check_space
+  require_tty
   confirm
+  if has_volumes && [[ $VOLUME_MODE == mirror ]]; then
+    confirm_deletions
+  fi
 
   safety_snapshot
   extract

@@ -45,7 +45,7 @@ Valeurs à substituer, notées entre chevrons :
 > ### La mise en place n'est terminée qu'à l'issue de l'étape 11
 >
 > Timers actifs et sauvegardes qui tournent ne prouvent rien : seule une
-> restauration réussie le prouve. Tant que les critères C1 à C7 du
+> restauration réussie le prouve. Tant que les critères C1 à C8 du
 > [test 1](RUNBOOK-RESTORE-TEST.md#test-1--restauration-complète-du-staging)
 > ne sont pas tous verts, le dispositif est **en rodage**, pas en service.
 
@@ -69,6 +69,8 @@ contrôlés à l'**étape 2**, avant toute écriture sur le serveur.
 | H7 | Base `alivaon_db`, utilisateur `alivaon_app`, avec `ALL PRIVILEGES ON alivaon_db.*` dans les deux environnements | README racine, « Connexion à Adminer » ; privilèges : comportement de l'image `mysql:8.0` pour `MYSQL_USER` | Noms confirmés, privilèges déduits |
 | H8 | Tables toutes InnoDB, aucune routine stockée ni événement | Application Doctrine standard | Déduit. `--single-transaction` n'est cohérent **que** pour InnoDB |
 | H9 | **Pilote `local` requis** pour chaque volume sauvegardé : seul ce pilote garantit que le point de montage donné par Docker est un dossier de l'hôte, lisible par restic et inscriptible par rsync | Aucun `driver:` dans les compose, donc pilote par défaut | Déduit. **Vérifié à chaque exécution** : les scripts refusent un volume absent ou d'un autre pilote (`resolve_volume`, `lib.sh`). Contrôlé aussi par la 3ᵉ commande de l'étape 2 |
+| H10 | PHP-FPM écrit dans les volumes sous l'UID:GID **82:82** (`www-data` de l'image), et la racine de chaque volume, `uploads` comme `cv_private`, lui appartient | README racine, « Connexion à File Browser » (uid 82, propriétaire réel des fichiers téléversés) ; `PUID`/`PGID` de `filebrowser/docker-compose.yml` | Confirmé pour `uploads` par le déploiement de File Browser, **déduit** pour `cv_private`. Constaté à la fin de l'étape 2 ; `restore.sh` le vérifie à chaque restauration (`<ENV>_APP_OWNER`) |
+| H11 | Les volumes ne portent ni ACL ni attributs étendus utiles à l'application | Aucune mention dans les compose ni dans l'application ; rsync restaure en `-a`, sans `-A` ni `-X` | Déduit, non contrôlé par ce runbook. Vérification possible sur l'hôte, si le paquet `acl` est installé : `sudo getfacl -R -s <point de montage>` ne doit rien afficher |
 
 **Les CV sont sauvegardés.** Le volume `cv_private` contient des fichiers
 téléversés par les candidats, absents de la base : sans sauvegarde, une perte
@@ -266,6 +268,60 @@ docker exec -it staging-db-1 mysql -u alivaon_app -p -e 'SHOW GRANTS'
 
 **Effet / Vérifier** : identiques, pour le staging (mot de passe de
 `/opt/alivaon/staging/.env`).
+
+### UID/GID de référence de l'application (H10)
+
+Les fichiers restaurés doivent appartenir à l'UID sous lequel PHP-FPM écrit.
+Si ce n'est pas le cas, la restauration paraît réussie et le premier
+téléversement échoue des heures plus tard. Les valeurs constatées ici sont la
+référence : elles vont dans `<ENV>_APP_OWNER` (étape 7), et `restore.sh` les
+vérifie.
+
+```bash
+docker top production-app-1 -o pid,uid,gid,args
+```
+
+**Effet** : liste les processus du conteneur applicatif, avec leurs UID et GID
+numériques.
+**Vérifier** : les processus `php-fpm: pool ...` (les workers, qui traitent
+les requêtes et écrivent les fichiers) tournent sous `82 82`. Le processus
+`php-fpm: master process` peut être en `0 0` (root) : il n'écrit pas les
+fichiers. **Noter** l'UID:GID des workers.
+
+```bash
+docker exec production-app-1 stat -c '%u:%g %a %n' /var/www/html/public/uploads /var/www/html/var/private
+```
+
+**Effet** : propriétaire, groupe et droits de la racine des deux volumes, vus
+depuis le conteneur.
+**Vérifier** : les deux lignes portent l'UID:GID des workers (`82:82`), avec un
+droit d'écriture pour le propriétaire (`755` ou `775`). Un autre propriétaire,
+en particulier sur `var/private` (H10 y est déduite) : s'arrêter et le
+signaler.
+
+```bash
+docker exec production-app-1 find /var/www/html/public/uploads /var/www/html/var/private ! -user 82 -print
+```
+
+**Effet** : liste les fichiers et dossiers des volumes qui n'appartiennent
+**pas** à l'UID 82.
+**Vérifier** : aucune sortie. Des lignes : les noter, ce sont des exceptions
+préexistantes que `restore.sh` reproduira telles quelles.
+
+```bash
+docker top staging-app-1 -o pid,uid,gid,args
+```
+
+```bash
+docker exec staging-app-1 stat -c '%u:%g %a %n' /var/www/html/public/uploads /var/www/html/var/private
+```
+
+```bash
+docker exec staging-app-1 find /var/www/html/public/uploads /var/www/html/var/private ! -user 82 -print
+```
+
+**Effet / Vérifier** : identiques, pour le staging. Même image, donc mêmes
+valeurs attendues.
 
 > **Fenêtre de maintenance commune.** Le correctif du healthcheck MySQL
 > ([docs/runbook-healthcheck-mysql.md](../docs/runbook-healthcheck-mysql.md))
@@ -779,6 +835,8 @@ sudo nano /etc/alivaon-backup/backup.env
   staging. Utilisés par `restore.sh` seulement ;
 - tout nom qui a différé de l'attendu à l'étape 2 ;
 - `RESTIC_EXCLUDE_FILE`, seulement si l'étape 2 l'a rendu nécessaire (H4) ;
+- `PRODUCTION_APP_OWNER`, `STAGING_APP_OWNER` : l'UID:GID des workers
+  PHP-FPM constaté à la fin de l'étape 2 (`82:82` attendu) ;
 - laisser `HC_PING_URL` vide pour l'instant (étape 10).
 
 `RESTIC_REPOSITORY` est déjà correct pour la Storage Box
@@ -970,11 +1028,12 @@ sudo systemctl start alivaon-backup.service
 ## Étape 11 — Test de restauration complet sur le staging [VPS, MAC]
 
 Dérouler [RUNBOOK-RESTORE-TEST.md](RUNBOOK-RESTORE-TEST.md) : **test 1**
-(restauration complète du staging, critères C1 à C7), **test 2** (dump de
+(restauration complète du staging, critères C1 à C8, dont un téléversement
+réel), **test 2** (dump de
 production rejoué dans un conteneur jetable), **test 3** (refus
 staging → production). Consigner les résultats dans son journal des tests.
 
-**Fin de la mise en place** : les critères C1 à C7 du test 1 sont tous verts,
+**Fin de la mise en place** : les critères C1 à C8 du test 1 sont tous verts,
 et les tests 2 et 3 conformes. À partir de là seulement, le dispositif est en
 service.
 

@@ -22,6 +22,9 @@
 #   F. mode de connexion MySQL (socket) et hôte du compte documenté dans le
 #      runbook ('backup'@'localhost'), qui doivent s'accorder
 #   G. résolution des volumes par docker volume inspect (pilote local requis)
+#   H. conteneur applicatif pendant la restauration (refus, --stop-app, trap)
+#   I. propriété et droits des fichiers restaurés
+#   J. modes --merge et --mirror, décompte et confirmation des suppressions
 #
 # CODE DE SORTIE : 0 si tous les cas passent, 1 sinon.
 #
@@ -302,16 +305,18 @@ section_e() (
     PRODUCTION_DB_CONTAINER=production-db-1 PRODUCTION_DB_NAME=alivaon_db
     PRODUCTION_DB_USER=alivaon_app PRODUCTION_DB_PASSWORD=x
     PRODUCTION_BACKUP_DB_USER=backup PRODUCTION_BACKUP_DB_PASSWORD=y
-    PRODUCTION_APP_CONTAINER=production-app-1
+    PRODUCTION_APP_CONTAINER=production-app-1 PRODUCTION_APP_OWNER=82:82
     PRODUCTION_VOLUMES='uploads=production_uploads cv_private=production_cv_private'
   }
   v_ok() { base_config; validate_config; }
   v_no_backup_pw() { base_config; unset PRODUCTION_BACKUP_DB_PASSWORD; validate_config; }
+  v_bad_owner() { base_config; PRODUCTION_APP_OWNER=www-data; validate_config; }
 
   section "E. validation de la configuration"
   expect_code 0 "configuration complète acceptée" v_ok
   expect_code 1 "PRODUCTION_BACKUP_DB_PASSWORD manquant -> refus" v_no_backup_pw
   check "message désignant la variable manquante" grep -q 'PRODUCTION_BACKUP_DB_PASSWORD' "$TEST_ROOT/log/out"
+  expect_code 1 "APP_OWNER non numérique (www-data) -> refus" v_bad_owner
 )
 
 # ── F. Mode de connexion MySQL et hôte du compte ─────────────────────────────
@@ -412,6 +417,217 @@ section_g() (
   check "aucun instantané tenté dans ce cas" test "$(grep -c '^backup' "$TEST_ROOT/log/restic")" -eq 0
 )
 
+# ── Restauration d'un volume : décor commun aux sections H, I et J ───────────
+#
+# Un instantané déjà extrait (WORK_DIR/files/<point de montage d'origine>), un
+# volume cible vide, et le listing de l'instantané tel que load_listings le
+# produit (« uid gid mode chemin »). Le propriétaire est l'utilisateur qui
+# lance les tests : hors root, c'est le seul qu'on puisse attribuer.
+
+# make_listing DOSSIER — listing au format de load_listings, construit depuis
+# un dossier réel, avec l'encodage des modes de restic (dossier : bit 1<<31).
+make_listing() {
+  local dir=$1 u g a name mode
+  find "$dir" -exec stat -c '%u %g %a %n' {} + | while IFS=' ' read -r u g a name; do
+    mode=$((8#$a))
+    if [[ -d $name ]]; then mode=$((mode | (1 << 31))); fi
+    name=${name#"$dir"}
+    name=${name#/}
+    printf '%s %s %s %s\n' "$u" "$g" "$mode" "${name:-.}"
+  done
+}
+
+restore_fixture() {
+  local fx=$TEST_ROOT/fx mp=/var/lib/docker/volumes/staging_uploads_staging/_data src
+  rm -rf -- "$fx" "$TEST_ROOT/containers"
+  : >"$TEST_ROOT/log/docker"
+  : >"$TEST_ROOT/log/rsync"
+  WORK_DIR=$fx/work
+  src=$WORK_DIR/files$mp
+  mkdir -p "$src/articles" "$fx/target"
+  echo image-a >"$src/articles/a.jpg"
+  echo image-b >"$src/b.png"
+  chmod 755 "$src" "$src/articles" "$fx/target"
+  chmod 644 "$src/articles/a.jpg" "$src/b.png"
+  TARGET=staging APP_CONTAINER=staging-app-1 T_DB_CONTAINER=staging-db-1
+  APP_OWNER="$(id -u):$(id -g)"
+  COMPONENTS=(uploads) ONLY='' STOP_APP=0 VOLUME_MODE=merge APP_STOPPED_BY_US=0
+  M_MP=([uploads]=$mp) M_VOL=([uploads]=staging_uploads_staging)
+  T_MP=([uploads]=$fx/target) T_VOL=([uploads]=staging_uploads_staging)
+  make_listing "$src" >"$WORK_DIR/listing.uploads"
+  FX_TARGET=$fx/target
+}
+
+app_state() {
+  mkdir -p "$TEST_ROOT/containers"
+  echo "$1" >"$TEST_ROOT/containers/staging-app-1"
+}
+app_running() { [[ $(cat "$TEST_ROOT/containers/staging-app-1" 2>/dev/null || echo true) == true ]]; }
+app_stopped() { ! app_running; }
+
+# ── H. Conteneur applicatif pendant la restauration ──────────────────────────
+
+section_h() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  section "H. conteneur applicatif pendant la restauration"
+
+  restore_fixture
+  app_state true
+  expect_code 1 "application en marche, sans --stop-app -> refus" check_app_state
+  check "refus : explique quoi arrêter et propose --stop-app" \
+    grep -q "staging-app-1 tourne.*docker stop staging-app-1.*--stop-app" "$TEST_ROOT/log/out"
+  check "refus : aucune écriture, cible intacte" test -z "$(ls -A "$FX_TARGET")"
+
+  restore_fixture
+  app_state false
+  expect_code 0 "application arrêtée -> restauration exécutée" write_target
+  check "fichiers restaurés dans le volume" test -f "$FX_TARGET/articles/a.jpg"
+  check "application arrêtée au départ : laissée arrêtée, jamais démarrée" \
+    test "$(app_stopped && echo arrêtée)/$(grep -c . "$TEST_ROOT/log/docker")" = "arrêtée/0"
+
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  expect_code 0 "--stop-app : restauration exécutée" write_target
+  check "--stop-app : arrêt puis redémarrage effectif" \
+    test "$(tr '\n' ',' <"$TEST_ROOT/log/docker")" = "stop staging-app-1,start staging-app-1,"
+  check "--stop-app : application de nouveau en marche" app_running
+  check "conteneur MySQL jamais arrêté" test "$(grep -c 'staging-db-1' "$TEST_ROOT/log/docker")" -eq 0
+
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  rsync_fails() (
+    export MOCK_RSYNC_EXIT=23
+    trap on_exit EXIT
+    write_target
+  )
+  expect_code 1 "--stop-app, échec de rsync -> la restauration s'arrête" rsync_fails
+  check "échec de rsync : arrêt immédiat, code rsync cité, aucune vérification tentée" \
+    test "$(grep -c 'rsync a échoué (code 23)' "$TEST_ROOT/log/out")/$(grep -c 'écart(s) de propriété' "$TEST_ROOT/log/out")" = "1/0"
+  check "échec de rsync : application redémarrée par le trap" app_running
+  check "échec de rsync : arrêt puis redémarrage consignés" \
+    test "$(tr '\n' ',' <"$TEST_ROOT/log/docker")" = "stop staging-app-1,start staging-app-1,"
+)
+
+# ── I. Propriété et droits des fichiers restaurés ────────────────────────────
+
+section_i() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  local mp=/var/lib/docker/volumes/x/_data
+  section "I. propriété et droits des fichiers restaurés"
+
+  restore_fixture
+  sync_volume uploads >/dev/null
+  check "rsync lancé avec -a (propriétaire, groupe, droits) et --numeric-ids" \
+    grep -q -- '-aH --numeric-ids' "$TEST_ROOT/log/rsync"
+  expect_code 0 "UID/GID et droits identiques à l'instantané -> vérification conforme" verify_volume uploads
+
+  restore_fixture
+  sync_volume uploads >/dev/null
+  sed -i.bak -E 's|^[0-9]+ ([0-9]+ [0-9]+ articles/a\.jpg)$|4242 \1|' "$WORK_DIR/listing.uploads"
+  expect_code 1 "écart de propriétaire (UID) détecté" verify_volume uploads
+  check "message : chemin, attendu et obtenu" grep -q "articles/a.jpg : attendu 4242:" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  sync_volume uploads >/dev/null
+  chmod 600 "$FX_TARGET/b.png"
+  expect_code 1 "écart de droits détecté (644 attendu, 600 obtenu)" verify_volume uploads
+  check "message : droits attendus et obtenus" grep -q "b.png : attendu .* 644, obtenu .* 600" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  sync_volume uploads >/dev/null
+  APP_OWNER=4242:4242
+  expect_code 1 "racine du volume hors de l'utilisateur de l'application -> échec" verify_volume uploads
+  check "message : le propriétaire de l'application est cité" grep -q "racine du volume : .* au lieu de 4242:4242" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  APP_OWNER=4242:4242
+  expect_code 1 "instantané appartenant à un autre UID que l'application -> refus avant écriture" check_snapshot_owner
+  check "refus avant écriture : cible intacte" test -z "$(ls -A "$FX_TARGET")"
+
+  printf '%s\n' \
+    '{"struct_type":"snapshot"}' \
+    "{\"struct_type\":\"node\",\"path\":\"$mp\",\"uid\":82,\"gid\":82,\"mode\":2147484141}" \
+    "{\"struct_type\":\"node\",\"path\":\"$mp/a b.jpg\",\"uid\":82,\"gid\":82,\"mode\":420}" \
+    "{\"struct_type\":\"node\",\"path\":\"${mp}2/intrus\",\"uid\":0,\"gid\":0,\"mode\":420}" \
+    >"$TEST_ROOT/restic/ls.json"
+  WORK_DIR=$TEST_ROOT/fx/work SNAP_ID=x SNAP_SHORT=x COMPONENTS=(uploads) M_MP=([uploads]=$mp)
+  load_listings
+  check "listing de l'instantané : racine « . », espaces conservés, chemin voisin exclu" \
+    test "$(tr '\n' '|' <"$WORK_DIR/listing.uploads")" = "82 82 2147484141 .|82 82 420 a b.jpg|"
+  check "mode restic -> droits Unix (dossier 755, fichier 644, setgid 2775)" \
+    test "$(perm_of 2147484141) $(perm_of 420) $(perm_of $(((1 << 31) | (1 << 22) | 8#775)))" = "755 644 2775"
+)
+
+# ── J. Modes --merge et --mirror ─────────────────────────────────────────────
+
+section_j() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  section "J. modes --merge et --mirror"
+
+  add_extras() {
+    echo x >"$FX_TARGET/recent-1.jpg"
+    echo x >"$FX_TARGET/recent-2.jpg"
+    echo x >"$FX_TARGET/recent-3.jpg"
+    mkdir -p "$FX_TARGET/nouveau"
+    echo x >"$FX_TARGET/nouveau/recent-4.jpg"
+  }
+
+  restore_fixture
+  VOLUME_MODE=''
+  expect_code 1 "volume à restaurer sans --merge ni --mirror -> refus" check_volume_mode
+  check "refus : les deux modes sont nommés" grep -q -- "--merge .*--mirror" "$TEST_ROOT/log/out"
+  expect_code 1 "--merge et --mirror ensemble -> refus" parse_args --target staging --snapshot latest --merge --mirror
+  COMPONENTS=(db)
+  expect_code 0 "base seule : aucun mode exigé" check_volume_mode
+
+  restore_fixture
+  add_extras
+  app_state false
+  VOLUME_MODE=merge
+  expect_code 0 "--merge : restauration exécutée" write_target
+  check "--merge : fichiers absents de l'instantané conservés" \
+    test -f "$FX_TARGET/recent-1.jpg" -a -f "$FX_TARGET/nouveau/recent-4.jpg"
+  check "--merge : rsync sans --delete" test "$(grep -c -- '--delete' "$TEST_ROOT/log/rsync")" -eq 0
+
+  restore_fixture
+  add_extras
+  VOLUME_MODE=mirror
+  count_deletions
+  check "décompte : 4 fichiers et 1 dossier, 5 entrées" \
+    test "${DEL_FILES[uploads]}/${DEL_DIRS[uploads]}/$DEL_TOTAL" = "4/1/5"
+  app_state false
+  # Enchaînement de main : l'écriture n'a lieu que si la confirmation passe.
+  mirror_refused() { confirm_deletions <<<"oui" && write_target; }
+  expect_code 1 "--mirror sans la bonne confirmation -> refus" mirror_refused
+  check "annonce avant suppression : 4 fichier(s) et 1 dossier(s), SUPPRIMER 5" \
+    grep -q "4 fichier(s) et 1 dossier(s).*" "$TEST_ROOT/log/out"
+  check "phrase de confirmation annoncée : SUPPRIMER 5" grep -q "tapez exactement :  SUPPRIMER 5" "$TEST_ROOT/log/out"
+  check "refus : rien n'a été supprimé" test -f "$FX_TARGET/recent-1.jpg"
+
+  mirror_confirmed() { confirm_deletions <<<"SUPPRIMER 5" && write_target; }
+  expect_code 0 "--mirror avec confirmation -> restauration exécutée" mirror_confirmed
+  check "--mirror : fichiers et dossier absents de l'instantané supprimés" \
+    test ! -e "$FX_TARGET/recent-1.jpg" -a ! -e "$FX_TARGET/nouveau"
+  check "--mirror : contenu de l'instantané présent" test -f "$FX_TARGET/articles/a.jpg" -a -f "$FX_TARGET/b.png"
+
+  restore_fixture
+  add_extras
+  app_state false
+  VOLUME_MODE=mirror
+  count_deletions
+  echo x >"$FX_TARGET/televerse-pendant-la-confirmation.jpg"
+  expect_code 1 "--mirror : décompte changé depuis la confirmation -> refus" write_target
+  check "décompte changé : rien n'a été supprimé" test -f "$FX_TARGET/recent-1.jpg"
+)
+
 {
   section_a
   section_b
@@ -420,6 +636,9 @@ section_g() (
   section_e
   section_f
   section_g
+  section_h
+  section_i
+  section_j
 } | tee "$RESULTS"
 
 pass=$(grep -c '^OK ' "$RESULTS")
