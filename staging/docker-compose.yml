@@ -58,16 +58,7 @@ services:
     networks:
       - internal
     healthcheck:
-      # SANS identifiants, délibérément. L'ancienne forme passait
-      # -p$$MYSQL_ROOT_PASSWORD en argument : le mot de passe root de MySQL
-      # était lisible dans `ps` sur l'hôte toutes les 10 s, par tout processus
-      # de la machine. `mysqladmin ping` renvoie 0 dès que le serveur répond,
-      # même par un refus d'accès : c'est exactement ce qu'un healthcheck doit
-      # tester (le serveur écoute-t-il ?), pas la validité d'un compte.
-      # -h 127.0.0.1 force TCP : le serveur temporaire lancé par l'image
-      # pendant l'initialisation n'écoute pas en TCP, le conteneur ne passe
-      # donc « healthy » qu'une fois le vrai serveur démarré.
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
       interval: 10s
       timeout: 5s
       retries: 10

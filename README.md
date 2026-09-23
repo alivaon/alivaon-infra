@@ -323,21 +323,8 @@ Détaillés dans [docs/traefik.md](docs/traefik.md) :
 - **`scripts/check-staging-auth.sh` n'est branché nulle part** — ni cron, ni
   pipeline. À raccorder à la supervision ou en fin de job de déploiement du
   staging.
-- **Sauvegarde hors serveur : prête, pas encore installée.** Le dispositif
-  restic (bases MySQL et volumes d'uploads, production et staging) est dans
-  [backup/](backup/README.md). Tant que [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md)
-  n'a pas été déroulé sur le VPS, une perte du serveur emporte tout. Restent
-  hors périmètre : les `.env` des stacks et `acme.json`. Son étape 0,
-  l'activation des instantanés de la Storage Box, est **obligatoire** : c'est
-  la seule protection des sauvegardes contre un VPS compromis.
-- **Healthcheck MySQL : corrigé dans le dépôt, pas encore déployé.** Les
-  services `db` de production et de staging passaient le mot de passe root de
-  MySQL en argument de `mysqladmin`, lisible dans `ps` sur l'hôte toutes les
-  10 secondes. Le dépôt porte la correction (`mysqladmin ping` sans
-  identifiants) ; le déploiement, qui recrée les conteneurs MySQL, est décrit
-  dans [docs/runbook-healthcheck-mysql.md](docs/runbook-healthcheck-mysql.md).
-  D'ici là, `scripts/diff-vps.sh` signale un écart sur les deux fichiers
-  compose, attendu.
+- **Aucune sauvegarde hors serveur** — les dumps `backups/` et `acme.json` ne
+  vivent que sur le VPS. Une perte du serveur les emporte.
 
 ## Accès à Portainer
 
@@ -609,10 +596,8 @@ planifiée ne les traite.
 
 La lecture seule sur la production protège des suppressions accidentelles **par
 File Browser**, mais ne remplace pas une sauvegarde : elle ne couvre ni la perte
-du serveur, ni une suppression par l'application elle-même.
-
-Le dispositif qui couvre ces volumes est prêt dans [backup/](backup/README.md),
-**en attente d'installation** : voir « Sauvegarde hors serveur » dans les
+du serveur, ni une suppression par l'application elle-même. Sujet distinct, à
+traiter pour lui-même — voir « Aucune sauvegarde hors serveur » dans les
 chantiers ouverts.
 
 ---
@@ -626,19 +611,6 @@ chantiers ouverts.
 - [docs/acces-admin.md](docs/acces-admin.md) — guide d'accès aux trois interfaces
   d'administration : tunnel SSH, connexion à Adminer et à File Browser,
   emplacement des mots de passe, dépannage
-- [backup/README.md](backup/README.md) — sauvegarde chiffrée hors machine
-  (restic) : fonctionnement, exploitation, restauration, rotation du mot de
-  passe, coût. Mise en place :
-  [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md) ; tests de restauration :
-  [backup/RUNBOOK-RESTORE-TEST.md](backup/RUNBOOK-RESTORE-TEST.md)
-- [docs/runbook-healthcheck-mysql.md](docs/runbook-healthcheck-mysql.md) —
-  déploiement du healthcheck MySQL sans mot de passe root
-- [docs/journal-installation-sauvegarde.md](docs/journal-installation-sauvegarde.md) —
-  journal de la mise en service de la sauvegarde, dont la topologie constatée
-  le 2026-09-23
-- [docs/chantiers-suivants.md](docs/chantiers-suivants.md) — travaux
-  identifiés hors des chantiers en cours, dont le site client `liens-canins`,
-  ni versionné ni sauvegardé
 
 ## Portée de ce dépôt
 

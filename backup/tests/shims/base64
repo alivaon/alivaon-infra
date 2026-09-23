@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# Traduit `base64 -w 0` (GNU) vers `base64 -b 0` (macOS).
-if [[ ${1:-} == -w ]]; then shift 2; exec /usr/bin/base64 -b 0 "$@"; fi
-exec /usr/bin/base64 "$@"

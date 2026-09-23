@@ -38,9 +38,3 @@ filebrowser/data/
 
 # macOS
 .DS_Store
-
-# Secrets du dispositif de sauvegarde. Ils ne vivent que sur le VPS, dans
-# /etc/alivaon-backup/ ; ces motifs empêchent qu'une copie locale faite par
-# erreur soit commitée. Seul backup/.env.example (gabarit sans valeur) est suivi.
-backup.env
-restic-password
