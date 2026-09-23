@@ -6,8 +6,8 @@ production.
 
 | Test | Prouve | Où | Fréquence | Durée |
 |---|---|---|---|---|
-| **0** | Le dépôt s'ouvre **sans le VPS**, avec le seul gestionnaire de mots de passe | Mac | À l'installation, puis à chaque rotation du mot de passe | 10 min |
-| **1** | Une restauration complète remet le staging en service | VPS + Mac | Mensuelle, et après toute modification de `backup/` | 30 min |
+| **0** | Le dépôt s'ouvre **sans le VPS**, avec le seul gestionnaire de mots de passe | Mac | À l'installation (étapes 1 et 8 de RUNBOOK-BACKUP), puis à chaque rotation du mot de passe | 10 min |
+| **1** | Une restauration complète remet le staging en service | VPS + Mac | À l'installation (étape 11 de RUNBOOK-BACKUP : **clôt la mise en place**), puis mensuelle, et après toute modification de `backup/` | 30 min |
 | **2** | La sauvegarde de **production** est restaurable, sans exposer ses données | VPS | Trimestrielle | 15 min |
 | **3** | Le garde-fou staging → production tient en conditions réelles | VPS | À l'installation, puis après toute modification de `restore.sh` | 2 min |
 
@@ -33,6 +33,11 @@ Valeurs relevées au fil du test, à noter au brouillon :
 Le scénario couvert : le VPS a disparu, avec `/etc/alivaon-backup/`. Il ne
 reste que le gestionnaire de mots de passe.
 
+Le test se joue deux fois lors de la mise en place : à l'**étape 1** de
+RUNBOOK-BACKUP, sur le dépôt tout juste créé et encore **vide**, avant que le
+VPS ne reçoive le mot de passe ; puis à l'**étape 8**, après la première
+sauvegarde. Les deux premiers blocs ne sont à refaire que sur un nouveau poste.
+
 ```bash
 brew install restic
 ```
@@ -57,8 +62,11 @@ restic --no-cache -r 'sftp://<UTILISATEUR_SB>@<HOTE_SB>:23/restic-alivaon' snaps
 le coller depuis le gestionnaire. `--no-cache` : rien n'est écrit sur le Mac.
 *Option B, S3* : `export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...`
 depuis le gestionnaire, puis même commande avec l'URL `s3:...`.
-**Critère de réussite** : la liste des instantanés s'affiche, dont ceux de la
-nuit précédente pour `env:production` et `env:staging`.
+**Critère de réussite** :
+- à l'étape 1 (dépôt vide) : restic ouvre le dépôt sans erreur et affiche une
+  liste vide ;
+- ensuite : la liste s'affiche, dont les instantanés de la dernière
+  sauvegarde pour `env:production` et `env:staging`.
 **Échec** (`wrong password`, dépôt introuvable) : **incident de priorité
 maximale**. Tant qu'il n'est pas résolu, une perte du VPS entraîne la perte de
 toutes les sauvegardes.
@@ -68,7 +76,7 @@ restic --no-cache -r 'sftp://<UTILISATEUR_SB>@<HOTE_SB>:23/restic-alivaon' cat c
 ```
 
 **Vérifier** : le champ `"id"` est égal à l'identifiant du dépôt noté dans le
-gestionnaire (RUNBOOK-BACKUP, étape 9).
+gestionnaire (RUNBOOK-BACKUP, étape 1).
 
 ---
 

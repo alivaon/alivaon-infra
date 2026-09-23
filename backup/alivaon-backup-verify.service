@@ -1,0 +1,49 @@
+# /etc/systemd/system/alivaon-backup-verify.service
+#
+# Contrôle hebdomadaire du dépôt restic, déclenché par
+# alivaon-backup-verify.timer :
+#   - restic check, avec relecture d'une fraction 1/8 des données qui change
+#     chaque semaine ISO (le dépôt entier est relu en huit semaines) ;
+#   - inventaire des instantanés ;
+#   - fraîcheur : dernier instantané de chaque environnement < 48 h.
+# Lancement manuel : systemctl start alivaon-backup-verify.service
+# Journal         : journalctl -u alivaon-backup-verify.service
+#
+# Tout échec (dépôt endommagé : code 1 ; sauvegarde trop ancienne : code 2)
+# déclenche alivaon-backup-failure.service, comme pour la sauvegarde.
+
+[Unit]
+Description=Alivaon — contrôle hebdomadaire du dépôt de sauvegarde (restic)
+Documentation=https://github.com/alivaon/alivaon-infra/tree/main/backup
+Wants=network-online.target
+After=network-online.target
+OnFailure=alivaon-backup-failure.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/alivaon-backup/verify.sh --read-data-rotation
+User=root
+
+# Même cache que la sauvegarde : les index ne sont pas retéléchargés.
+CacheDirectory=alivaon-backup
+CacheDirectoryMode=0700
+Environment=RESTIC_CACHE_DIR=/var/cache/alivaon-backup
+
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# 1/8 du dépôt est téléchargé et déchiffré : large marge.
+TimeoutStartSec=6h
+
+# Durcissement identique à alivaon-backup.service. verify.sh n'écrit que dans
+# le cache restic.
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

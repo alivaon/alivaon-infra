@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# numfmt absent de macOS : renvoie le nombre tel quel (affichage seulement).
+echo "${!#}"

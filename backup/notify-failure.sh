@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 #
 # Notification d'échec, déclenchée par alivaon-backup-failure.service via la
-# directive OnFailure= de alivaon-backup.service.
+# directive OnFailure= de alivaon-backup.service ET de
+# alivaon-backup-verify.service (contrôle hebdomadaire).
+#
+# Unité en échec, par ordre de préférence :
+#   1. argument explicite ;
+#   2. $MONITOR_UNIT, transmis par systemd >= 251 aux unités OnFailure=
+#      (Ubuntu 24.04) ;
+#   3. à défaut (Ubuntu 22.04, systemd 249), toute unité du dispositif en état
+#      « failed » ; si aucune ne l'est (déclenchement manuel, pour test),
+#      alivaon-backup.service.
 #
 #   - journalise l'échec en priorité « err », avec les dernières lignes de
 #     l'exécution fautive : `journalctl -p err` suffit à le retrouver ;
@@ -28,26 +37,56 @@ SCRIPT_DIR=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
-UNIT=${1:-alivaon-backup.service}
+readonly WATCHED_UNITS=(alivaon-backup.service alivaon-backup-verify.service)
+
+failed_units() {
+  local u
+  if [[ -n ${1:-} ]]; then
+    printf '%s\n' "$1"
+    return
+  fi
+  if [[ -n ${MONITOR_UNIT:-} ]]; then
+    printf '%s\n' "$MONITOR_UNIT"
+    return
+  fi
+  local found=0
+  for u in "${WATCHED_UNITS[@]}"; do
+    if systemctl is-failed --quiet "$u" 2>/dev/null; then
+      printf '%s\n' "$u"
+      found=1
+    fi
+  done
+  ((found)) || printf '%s\n' "${WATCHED_UNITS[0]}"
+}
+
+# unit_excerpt UNITÉ — dernières lignes de la dernière exécution de l'unité.
+unit_excerpt() {
+  local invocation out
+  invocation=$(systemctl show -p InvocationID --value "$1" 2>/dev/null || true)
+  if [[ -n $invocation ]]; then
+    out=$(journalctl --no-pager -o short-iso "_SYSTEMD_INVOCATION_ID=$invocation" 2>/dev/null | tail -n 40 || true)
+  fi
+  if [[ -z ${out:-} ]]; then
+    out=$(journalctl --no-pager -o short-iso -u "$1" -n 40 2>/dev/null || true)
+  fi
+  printf '%s\n' "${out:-(journal indisponible)}"
+}
 
 main() {
-  local invocation excerpt
+  local unit line text excerpt
+  local -a units
   excerpt=$(mktemp)
   trap 'rm -f -- "$excerpt"' EXIT
 
-  # Dernière exécution de l'unité uniquement, pas l'historique complet.
-  invocation=$(systemctl show -p InvocationID --value "$UNIT" 2>/dev/null || true)
-  if [[ -n $invocation ]]; then
-    journalctl --no-pager -o short-iso "_SYSTEMD_INVOCATION_ID=$invocation" | tail -n 40 >"$excerpt" || true
-  fi
-  if [[ ! -s $excerpt ]]; then
-    journalctl --no-pager -o short-iso -u "$UNIT" -n 40 >"$excerpt" || true
-  fi
-
-  error "ÉCHEC de $UNIT — dernières lignes :"
-  while IFS= read -r line; do
-    error "  | $line"
-  done <"$excerpt"
+  mapfile -t units < <(failed_units "${1:-}")
+  for unit in "${units[@]}"; do
+    text=$(unit_excerpt "$unit")
+    printf '=== ÉCHEC de %s ===\n%s\n' "$unit" "$text" >>"$excerpt"
+    error "ÉCHEC de $unit — dernières lignes :"
+    while IFS= read -r line; do
+      error "  | $line"
+    done <<<"$text"
+  done
 
   # Chargement dans un sous-shell d'abord : si la configuration est la cause
   # de l'échec, load_config quitterait ce script avant toute notification.

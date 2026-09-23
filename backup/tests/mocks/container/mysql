@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Simulacre du client mysql : consigne le fichier d'options et l'entrée reçue.
+set -euo pipefail
+: "${TEST_ROOT:?variable posée par tests/run.sh}"
+cnf=${1#--defaults-extra-file=}
+{ echo "ARGS: $*"; echo "CNF_PATH: $cnf"; cat "$cnf"; } >"$TEST_ROOT/log/mysql"
+cat >"$TEST_ROOT/log/mysql.stdin"

@@ -3,8 +3,13 @@
 # Contrôle de santé du dépôt restic — lecture seule, relançable à volonté.
 #
 #   1. restic check : intégrité de la structure du dépôt (index, arbres).
-#      Avec --read-data-subset, relit et déchiffre aussi une fraction des
-#      données, ce qui détecte une corruption côté stockage.
+#      Seul, il ne lit AUCUNE donnée : un bloc corrompu sur le stockage passe
+#      inaperçu. D'où deux modes de relecture des données :
+#        --read-data-rotation   relit 1/8 du dépôt, une fraction différente
+#                               chaque semaine ISO : le dépôt entier est relu
+#                               en huit semaines. Mode du timer hebdomadaire
+#                               alivaon-backup-verify.timer ;
+#        --read-data-subset N%  relit un échantillon aléatoire, à la main.
 #   2. restic snapshots : inventaire affiché.
 #   3. Fraîcheur : pour chaque environnement de BACKUP_ENVIRONMENTS, le dernier
 #      instantané planifié doit dater de moins de MAX_AGE_HOURS (48 h).
@@ -13,7 +18,8 @@
 # résume toutes.
 #
 # UTILISATION (sur le VPS, en root)
-#   /usr/local/lib/alivaon-backup/verify.sh
+#   /usr/local/lib/alivaon-backup/verify.sh                        contrôle rapide
+#   /usr/local/lib/alivaon-backup/verify.sh --read-data-rotation   hebdomadaire
 #   /usr/local/lib/alivaon-backup/verify.sh --read-data-subset 5%
 #
 # CODES DE SORTIE
@@ -31,15 +37,36 @@ SCRIPT_DIR=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
 . "$SCRIPT_DIR/lib.sh"
 
 READ_SUBSET=''
+READ_ROTATION=0
 
 usage() {
   cat <<'EOF'
-Usage : verify.sh [--read-data-subset N%]
+Usage : verify.sh [--read-data-rotation | --read-data-subset N%]
 
-  --read-data-subset N%   relit aussi N % des données (téléchargement réel :
-                          compter le trafic et la durée). Ex. 5%.
+  (sans option)           contrôle rapide : structure, inventaire, fraîcheur.
+  --read-data-rotation    relit en plus la fraction k/8 du dépôt, k dépendant
+                          de la semaine ISO : tout le dépôt en huit semaines.
+                          C'est le mode du timer hebdomadaire.
+  --read-data-subset N%   relit en plus N % des données, tirés au hasard.
   -h, --help              cette aide.
+
+La relecture télécharge réellement les données : compter trafic et durée.
 EOF
+}
+
+# read_data_slice EPOCH — fraction « k/8 » à relire la semaine contenant EPOCH.
+#
+# k suit un compteur de semaines ISO CONTINU : semaines écoulées depuis le
+# lundi 29 décembre 1969 (le 1er janvier 1970 était un jeudi, d'où le +3 en
+# jours). `date +%V` ne convient pas : il repasse à 1 au changement d'année
+# après 52 ou 53 semaines, et la rotation sauterait ou répéterait des
+# fractions fin décembre. Ici, deux semaines consécutives donnent toujours deux
+# fractions consécutives (modulo 8), et huit semaines consécutives les
+# couvrent toutes. Calcul en jours UTC : le timer s'exécute le dimanche en
+# fin de matinée, loin de minuit dans les deux fuseaux.
+read_data_slice() {
+  local days=$(($1 / 86400))
+  printf '%s/8' "$((((days + 3) / 7) % 8 + 1))"
 }
 
 # snapshot_age_hours ENV — âge en heures du dernier instantané planifié, ou
@@ -66,10 +93,21 @@ main() {
         READ_SUBSET=$2
         shift 2
         ;;
+      --read-data-rotation)
+        READ_ROTATION=1
+        shift
+        ;;
       -h | --help) usage; exit 0 ;;
       *) usage; exit 1 ;;
     esac
   done
+
+  if ((READ_ROTATION)) && [[ -n $READ_SUBSET ]]; then
+    die "--read-data-rotation et --read-data-subset s'excluent"
+  fi
+  if ((READ_ROTATION)); then
+    READ_SUBSET=$(read_data_slice "$(date +%s)")
+  fi
 
   require_root
   require_cmds restic jq
@@ -79,6 +117,9 @@ main() {
   trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
 
   info "dépôt : $RESTIC_REPOSITORY"
+  if ((READ_ROTATION)); then
+    info "relecture tournante : fraction $READ_SUBSET (semaine ISO $(date +%G-W%V))"
+  fi
 
   # 1. Intégrité
   if [[ -n $READ_SUBSET ]]; then

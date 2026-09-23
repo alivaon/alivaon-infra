@@ -327,7 +327,17 @@ Détaillés dans [docs/traefik.md](docs/traefik.md) :
   restic (bases MySQL et volumes d'uploads, production et staging) est dans
   [backup/](backup/README.md). Tant que [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md)
   n'a pas été déroulé sur le VPS, une perte du serveur emporte tout. Restent
-  hors périmètre : les `.env` des stacks et `acme.json`.
+  hors périmètre : les `.env` des stacks et `acme.json`. Son étape 0,
+  l'activation des instantanés de la Storage Box, est **obligatoire** : c'est
+  la seule protection des sauvegardes contre un VPS compromis.
+- **Healthcheck MySQL : corrigé dans le dépôt, pas encore déployé.** Les
+  services `db` de production et de staging passaient le mot de passe root de
+  MySQL en argument de `mysqladmin`, lisible dans `ps` sur l'hôte toutes les
+  10 secondes. Le dépôt porte la correction (`mysqladmin ping` sans
+  identifiants) ; le déploiement, qui recrée les conteneurs MySQL, est décrit
+  dans [docs/runbook-healthcheck-mysql.md](docs/runbook-healthcheck-mysql.md).
+  D'ici là, `scripts/diff-vps.sh` signale un écart sur les deux fichiers
+  compose, attendu.
 
 ## Accès à Portainer
 
@@ -618,8 +628,11 @@ chantiers ouverts.
   emplacement des mots de passe, dépannage
 - [backup/README.md](backup/README.md) — sauvegarde chiffrée hors machine
   (restic) : fonctionnement, exploitation, restauration, rotation du mot de
-  passe, coût. Mise en place : [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md) ;
-  tests : [backup/RUNBOOK-RESTORE-TEST.md](backup/RUNBOOK-RESTORE-TEST.md)
+  passe, coût. Mise en place :
+  [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md) ; tests de restauration :
+  [backup/RUNBOOK-RESTORE-TEST.md](backup/RUNBOOK-RESTORE-TEST.md)
+- [docs/runbook-healthcheck-mysql.md](docs/runbook-healthcheck-mysql.md) —
+  déploiement du healthcheck MySQL sans mot de passe root
 
 ## Portée de ce dépôt
 

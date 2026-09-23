@@ -247,7 +247,7 @@ load_target() {
 }
 
 select_components() {
-  local c mp r
+  local c r
   if [[ -z $ONLY ]]; then
     COMPONENTS=(db "${M_ROLES[@]}")
   else
@@ -262,15 +262,14 @@ select_components() {
       [[ $M_DB_NAME == "$T_DB_NAME" ]] ||
         die "base '$M_DB_NAME' dans l'instantané, '$T_DB_NAME' sur la cible : refus"
       container_running "$T_DB_CONTAINER" || die "conteneur MySQL cible $T_DB_CONTAINER arrêté ou absent"
-      db_run "$TARGET" "$DB_PING_SCRIPT" </dev/null ||
+      db_run "$TARGET" restore "$DB_PING_SCRIPT" </dev/null ||
         die "connexion MySQL impossible dans $T_DB_CONTAINER avec ${TARGET^^}_DB_USER : vérifier les identifiants"
     else
       [[ -n ${M_MP[$c]:-} ]] ||
         die "composant '$c' absent de l'instantané (disponibles : db $(join_by ' ' "${M_ROLES[@]}"))"
       [[ -n ${T_VOL[$c]:-} ]] || die "rôle '$c' sans volume cible dans ${TARGET^^}_VOLUMES"
-      mp=$(volume_mountpoint "${T_VOL[$c]}") ||
-        die "volume cible '${T_VOL[$c]}' introuvable : démarrer la stack '$TARGET' une première fois pour le créer"
-      T_MP[$c]=$mp
+      resolve_volume "${T_VOL[$c]}" "démarrer la stack '$TARGET' une première fois pour le créer"
+      T_MP[$c]=$VOLUME_MOUNTPOINT
     fi
   done
 
@@ -384,7 +383,7 @@ write_target() {
   for c in "${COMPONENTS[@]}"; do
     if [[ $c == db ]]; then
       info "import du dump dans $T_DB_CONTAINER (DROP puis CREATE DATABASE $T_DB_NAME)"
-      db_run "$TARGET" "$DB_IMPORT_SCRIPT" <"$WORK_DIR/db.sql"
+      db_run "$TARGET" restore "$DB_IMPORT_SCRIPT" <"$WORK_DIR/db.sql"
     else
       info "synchronisation $c -> ${T_MP[$c]}"
       rsync -aH --numeric-ids --delete -- "$WORK_DIR/files${M_MP[$c]}/" "${T_MP[$c]}/"

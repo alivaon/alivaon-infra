@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Simulacre de mysqldump : consigne ses arguments et le fichier d'options reçu.
+set -euo pipefail
+: "${TEST_ROOT:?variable posée par tests/run.sh}"
+cnf=${1#--defaults-extra-file=}
+{
+  echo "ARGS: $*"
+  echo "MODE: $(stat -c %a "$cnf")"
+  echo "CNF_PATH: $cnf"
+  echo "CNF<<"
+  cat "$cnf"
+  echo ">>CNF"
+} >"$TEST_ROOT/log/mysqldump"
+# Avertissement ou échec simulés à la demande.
+if [[ -n ${MOCK_MYSQLDUMP_STDERR:-} ]]; then echo "$MOCK_MYSQLDUMP_STDERR" >&2; fi
+if [[ -n ${MOCK_MYSQLDUMP_EXIT:-} ]]; then exit "$MOCK_MYSQLDUMP_EXIT"; fi
+echo "CREATE TABLE t (id int);"
+echo "-- Dump completed on 2026-09-23"

@@ -9,6 +9,9 @@
 # puis, une fois tous les environnements sauvegardés :
 #   3. `restic forget --prune` selon la rétention (7 j / 4 sem / 6 mois).
 #
+# Le dump utilise l'utilisateur MySQL `backup` (lecture seule, connexion par
+# socket), jamais l'utilisateur applicatif.
+#
 # Échec rapide : le script s'arrête avec un code non nul dès qu'une étape
 # échoue, et ne purge alors rien. Les dumps temporaires sont supprimés dans
 # tous les cas, succès, erreur ou interruption.

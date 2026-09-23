@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Traduit `stat -c FORMAT [--] FICHIER` (GNU) vers le stat BSD de macOS.
+fmt=$2
+f=${!#}
+fmt=${fmt//%a/%Lp}
+fmt=${fmt//%s/%z}
+exec /usr/bin/stat -f "$fmt" "$f"

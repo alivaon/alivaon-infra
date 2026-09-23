@@ -1,0 +1,19 @@
+# /etc/systemd/system/alivaon-backup-verify.timer
+#
+# Contrôle hebdomadaire, le dimanche en fin de matinée : huit heures après la
+# sauvegarde de 03:15, donc sans chevauchement, et le dernier jour de la
+# semaine ISO, ce qui fixe la fraction relue (voir verify.sh).
+# Contrôle : systemctl list-timers alivaon-backup-verify.timer
+
+[Unit]
+Description=Alivaon — contrôle hebdomadaire du dépôt (dimanche 11:15 Europe/Paris)
+
+[Timer]
+OnCalendar=Sun *-*-* 11:15:00 Europe/Paris
+RandomizedDelaySec=15min
+# Serveur éteint le dimanche : le contrôle est rattrapé au démarrage.
+Persistent=true
+Unit=alivaon-backup-verify.service
+
+[Install]
+WantedBy=timers.target

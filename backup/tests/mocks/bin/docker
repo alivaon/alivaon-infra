@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Simulacre de docker pour tests/run.sh.
+#   exec -i CONTENEUR CMD...   exécute CMD localement, les simulacres du
+#                              « conteneur » (mysqldump, mysql) en tête du PATH
+#   inspect ...                conteneur en marche
+#   volume inspect -f '{{.Driver}} {{.Mountpoint}}' NOM
+#                              « local $TEST_ROOT/volumes/NOM » ; le pilote est
+#                              lu dans $TEST_ROOT/volumes/NOM.driver s'il existe.
+#                              Volume absent (dossier inexistant) : code 1.
+set -euo pipefail
+: "${TEST_ROOT:?variable posée par tests/run.sh}" "${TEST_MOCKS:?variable posée par tests/run.sh}"
+case $1 in
+  exec)
+    shift
+    [[ $1 == -i ]] && shift
+    shift # nom du conteneur
+    PATH="$TEST_MOCKS/container:$PATH" exec "$@"
+    ;;
+  inspect) echo true ;;
+  volume)
+    name=${!#}
+    [[ -d $TEST_ROOT/volumes/$name ]] || { echo "Error: no such volume: $name" >&2; exit 1; }
+    driver=local
+    if [[ -f $TEST_ROOT/volumes/$name.driver ]]; then driver=$(<"$TEST_ROOT/volumes/$name.driver"); fi
+    echo "$driver $TEST_ROOT/volumes/$name"
+    ;;
+  *) exit 1 ;;
+esac

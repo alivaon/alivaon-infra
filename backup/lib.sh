@@ -101,7 +101,7 @@ check_restic_version() {
   out=$(restic version) || die "restic ne répond pas"
   IFS=' ' read -r _ ver _ <<<"$out"
   version_ge "$ver" "$ALIVAON_RESTIC_MIN_VERSION" ||
-    die "restic $ver trop ancien (minimum $ALIVAON_RESTIC_MIN_VERSION) : voir RUNBOOK-BACKUP.md, étape 3."
+    die "restic $ver trop ancien (minimum $ALIVAON_RESTIC_MIN_VERSION) : voir RUNBOOK-BACKUP.md, étape 4."
 }
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ validate_config() {
   ((${#envs[@]} > 0)) || die "BACKUP_ENVIRONMENTS est vide"
   for env in "${envs[@]}"; do
     is_known_env "$env" || die "environnement inconnu dans BACKUP_ENVIRONMENTS : '$env' (admis : $(join_by ' ' "${ALIVAON_KNOWN_ENVS[@]}"))"
-    for v in DB_CONTAINER DB_NAME DB_USER DB_PASSWORD APP_CONTAINER VOLUMES; do
+    for v in DB_CONTAINER DB_NAME DB_USER DB_PASSWORD BACKUP_DB_USER BACKUP_DB_PASSWORD APP_CONTAINER VOLUMES; do
       [[ -n $(env_get "$env" "$v") ]] || die "variable ${env^^}_$v manquante ou vide dans la configuration"
     done
     [[ $(env_get "$env" DB_NAME) =~ ^[A-Za-z0-9_]+$ ]] ||
@@ -252,8 +252,27 @@ container_running() {
   [[ $(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null) == true ]]
 }
 
-volume_mountpoint() {
-  docker volume inspect --format '{{ .Mountpoint }}' "$1" 2>/dev/null
+# resolve_volume VOLUME [INDICATION] — point de montage du volume sur l'hôte,
+# DEMANDÉ À DOCKER (docker volume inspect), jamais déduit d'une disposition de
+# répertoires. Résultat dans la variable globale VOLUME_MOUNTPOINT : pas de
+# sous-shell, pour que `die` interrompe bien le script appelant.
+#
+# Échec explicite si le volume est absent, ou si son pilote n'est pas `local`
+# (hypothèse H9) : seul ce pilote garantit que le point de montage est un
+# dossier de l'hôte que restic peut lire et que rsync peut écrire. Un volume
+# d'un autre pilote (NFS, plugin tiers) serait sauvegardé vide ou pas du tout.
+VOLUME_MOUNTPOINT=''
+resolve_volume() {
+  local vol=$1 hint=${2:-} out driver mp
+  VOLUME_MOUNTPOINT=''
+  out=$(docker volume inspect -f '{{.Driver}} {{.Mountpoint}}' "$vol" 2>/dev/null) ||
+    die "volume Docker '$vol' introuvable${hint:+ : $hint}"
+  IFS=' ' read -r driver mp <<<"$out"
+  [[ $driver == local ]] ||
+    die "volume Docker '$vol' : pilote '$driver' non pris en charge, seul le pilote 'local' l'est (hypothèse H9)"
+  [[ -n $mp && -d $mp ]] ||
+    die "volume Docker '$vol' : point de montage '$mp' absent de l'hôte"
+  VOLUME_MOUNTPOINT=$mp
 }
 
 # wait_healthy CONTENEUR [DÉLAI_S] — attend « healthy », ou « running » pour un
@@ -294,15 +313,38 @@ mysql_opt_escape() {
   printf '%s' "$s"
 }
 
-# db_cnf_line ENV — le fichier d'options encodé, sur une ligne.
+# Deux profils d'identifiants, jamais interchangés :
+#   dump     utilisateur MySQL `backup` (<ENV>_BACKUP_DB_*), lecture seule :
+#            SELECT, SHOW VIEW, TRIGGER sur la base, et rien d'autre (jeu
+#            minimal ; l'escalade éventuelle est documentée à l'étape 3 du
+#            runbook). La sauvegarde ne dépend donc pas des privilèges de
+#            l'application, qui restent minimaux ;
+#   restore  utilisateur applicatif (<ENV>_DB_*), seul à pouvoir supprimer et
+#            recréer la base lors d'une restauration.
+#
+# MODE DE CONNEXION : socket Unix, imposé par `protocol=socket`. Le client
+# tourne DANS le conteneur MySQL (docker exec), sans -h. MySQL évalue alors la
+# connexion comme venant de 'localhost' : le compte doit être créé en
+# 'backup'@'localhost', et c'est ce que fait le runbook. Une connexion TCP, même
+# vers 127.0.0.1, serait évaluée comme 'backup'@'127.0.0.1' et refusée
+# (ERROR 1045, Access denied). `protocol=socket` est explicite pour qu'aucun
+# `host=` d'un fichier d'options global du conteneur ne bascule en TCP à notre
+# insu. tests/run.sh vérifie l'accord entre ce mode et l'hôte du runbook.
+
+# db_cnf_line ENV PROFIL — le fichier d'options encodé, sur une ligne.
 db_cnf_line() {
-  local user pass enc
-  user=$(mysql_opt_escape "$(env_get "$1" DB_USER)")
-  pass=$(mysql_opt_escape "$(env_get "$1" DB_PASSWORD)")
+  local user pass enc prefix
+  case $2 in
+    dump) prefix=BACKUP_DB ;;
+    restore) prefix=DB ;;
+    *) die "profil d'identifiants inconnu : '$2'" ;;
+  esac
+  user=$(mysql_opt_escape "$(env_get "$1" "${prefix}_USER")")
+  pass=$(mysql_opt_escape "$(env_get "$1" "${prefix}_PASSWORD")")
   # La substitution retire tout saut de ligne final, quelle que soit
   # l'implémentation de base64 : exactement une ligne est émise, sans quoi le
   # client MySQL recevrait une ligne vide parasite en tête du dump.
-  enc=$(printf '[client]\nuser="%s"\npassword="%s"\n' "$user" "$pass" | base64 -w 0)
+  enc=$(printf '[client]\nprotocol=socket\nuser="%s"\npassword="%s"\n' "$user" "$pass" | base64 -w 0)
   printf '%s\n' "$enc"
 }
 
@@ -320,16 +362,32 @@ printf '%s' "$line" | base64 -d > "$cnf"
 EOF
 )
 
-# --single-transaction : instantané cohérent des tables InnoDB sans verrou.
-# --no-tablespaces     : évite d'exiger le privilège global PROCESS (8.0.21+).
+# --single-transaction : instantané cohérent des tables InnoDB, sans LOCK TABLES
+#                        (d'où l'absence de ce privilège).
+# --quick              : lignes écrites au fil de l'eau, sans tout charger en
+#                        mémoire.
+# --routines           : procédures et fonctions stockées (aucune attendue,
+#                        hypothèse H8 ; l'option garantit qu'une routine ajoutée
+#                        plus tard ne serait pas perdue en silence).
+# --triggers           : déclencheurs (défaut de mysqldump, rendu explicite).
+# --no-tablespaces     : n'interroge pas INFORMATION_SCHEMA.FILES, qui exige le
+#                        privilège global PROCESS depuis 8.0.21. C'est ce qui
+#                        permet de NE PAS accorder PROCESS à l'utilisateur
+#                        backup. Les CREATE TABLESPACE sont inutiles ici
+#                        (InnoDB, un fichier par table).
+# --default-character-set=utf8mb4 : PAS cosmétique. Un dump dans un autre
+#                        encodage altère le contenu accentué, et le défaut ne
+#                        se voit qu'à la restauration.
+# --hex-blob           : colonnes binaires en hexadécimal, insensibles à
+#                        l'encodage.
 # --set-gtid-purged=OFF: dump rejouable sans privilège SUPER.
 # --databases + --add-drop-database : le dump recrée la base à l'identique
 #   (jeu de caractères et collation compris). La restauration est donc
 #   complète : une table apparue après l'instantané ne survit pas.
 readonly DB_DUMP_SCRIPT="$_DB_PROLOGUE
 mysqldump --defaults-extra-file=\"\$cnf\" \\
-  --single-transaction --quick --no-tablespaces --hex-blob --triggers \\
-  --set-gtid-purged=OFF --default-character-set=utf8mb4 \\
+  --single-transaction --quick --routines --triggers --no-tablespaces \\
+  --default-character-set=utf8mb4 --hex-blob --set-gtid-purged=OFF \\
   --add-drop-database --databases \"\$1\""
 
 # shellcheck disable=SC2034  # utilisé par restore.sh
@@ -341,13 +399,14 @@ mysql --defaults-extra-file=\"\$cnf\" --default-character-set=utf8mb4"
 readonly DB_PING_SCRIPT="$_DB_PROLOGUE
 mysql --defaults-extra-file=\"\$cnf\" -N -B -e 'SELECT 1' > /dev/null"
 
-# db_run ENV SCRIPT [ARG...] — exécute SCRIPT dans le conteneur MySQL de ENV.
-# L'entrée standard de l'appelant est transmise après la ligne d'options.
+# db_run ENV PROFIL SCRIPT [ARG...] — exécute SCRIPT dans le conteneur MySQL de
+# ENV avec les identifiants du PROFIL (dump ou restore). L'entrée standard de
+# l'appelant est transmise après la ligne d'options.
 db_run() {
-  local env=$1 script=$2 container
-  shift 2
+  local env=$1 profile=$2 script=$3 container
+  shift 3
   container=$(env_get "$env" DB_CONTAINER)
-  { db_cnf_line "$env"; cat; } | docker exec -i "$container" sh -c "$script" alivaon-backup "$@"
+  { db_cnf_line "$env" "$profile"; cat; } | docker exec -i "$container" sh -c "$script" alivaon-backup "$@"
 }
 
 # check_dump FICHIER — refuse un dump vide ou tronqué. mysqldump n'écrit sa
@@ -386,7 +445,7 @@ prepare_dump_dir() {
 
 backup_env() {
   local env=$1 kind=$2
-  local db_container db_name dump_dir dump_file spec role vol mp rc=0
+  local db_container db_name dump_dir dump_file err_file line spec role vol mp rc=0
   local -a specs paths manifest args
 
   db_container=$(env_get "$env" DB_CONTAINER)
@@ -401,8 +460,18 @@ backup_env() {
   # 1. Base : dump d'abord, fichiers ensuite. Un fichier téléversé entre les
   #    deux figure dans l'instantané sans ligne en base (orphelin inoffensif).
   #    Dans l'ordre inverse, la base pourrait référencer un fichier absent.
-  info "[$env] mysqldump --single-transaction de '$db_name' dans $db_container"
-  db_run "$env" "$DB_DUMP_SCRIPT" "$db_name" </dev/null >"$dump_file.partial"
+  #    La sortie d'erreur est recueillie HORS du dossier archivé, puis
+  #    journalisée ligne à ligne, horodatée : un avertissement de mysqldump
+  #    (privilège manquant sur une routine, par exemple) reste visible.
+  err_file=$ALIVAON_DUMP_ROOT/$env.stderr
+  CLEANUP_DIRS+=("$err_file")
+  info "[$env] mysqldump --single-transaction de '$db_name' dans $db_container (utilisateur $(env_get "$env" BACKUP_DB_USER))"
+  db_run "$env" dump "$DB_DUMP_SCRIPT" "$db_name" </dev/null >"$dump_file.partial" 2>"$err_file" || rc=$?
+  while IFS= read -r line; do
+    warn "[$env] mysqldump : $line"
+  done <"$err_file"
+  rm -f -- "$err_file"
+  ((rc == 0)) || die "[$env] mysqldump a échoué (code $rc) : voir les lignes « mysqldump : » ci-dessus"
   check_dump "$dump_file.partial"
   mv -f -- "$dump_file.partial" "$dump_file"
 
@@ -420,8 +489,8 @@ backup_env() {
   for spec in "${specs[@]}"; do
     role=${spec%%=*}
     vol=${spec#*=}
-    mp=$(volume_mountpoint "$vol") || die "[$env] volume Docker '$vol' introuvable (rôle $role)"
-    [[ -d $mp ]] || die "[$env] point de montage absent pour '$vol' : $mp"
+    resolve_volume "$vol" "rôle $role de l'environnement $env"
+    mp=$VOLUME_MOUNTPOINT
     if [[ -z $(find "$mp" -mindepth 1 -print -quit) ]]; then
       warn "[$env] volume '$vol' VIDE : sauvegardé tel quel, à vérifier"
     fi

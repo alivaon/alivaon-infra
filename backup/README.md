@@ -10,36 +10,56 @@ distinct du VPS. Outil : [restic](https://restic.net), chiffrement côté client
 > retrouver : ni Hetzner, ni restic, ni un support quelconque.
 >
 > Sur le serveur, il vit dans `/etc/alivaon-backup/restic-password`, qui
-> disparaît avec le VPS. **Une copie doit exister dans le gestionnaire de mots
-> de passe**, faute de quoi, après une perte totale du VPS, les sauvegardes
-> existent mais sont illisibles à jamais.
+> disparaît avec le VPS. **La référence est la copie du gestionnaire de mots
+> de passe** : le dépôt est créé depuis le Mac avec elle, avant que le VPS n'en
+> reçoive un exemplaire. Sans elle, après une perte totale du VPS, les
+> sauvegardes existent mais sont illisibles à jamais.
 >
-> Le Test 0 de [RUNBOOK-RESTORE-TEST.md](RUNBOOK-RESTORE-TEST.md) prouve que
-> cette copie fonctionne. Il est obligatoire à l'installation et après chaque
-> rotation.
+> Le test 0 de [RUNBOOK-RESTORE-TEST.md](RUNBOOK-RESTORE-TEST.md) prouve que
+> cette copie ouvre le dépôt. Il est obligatoire à l'installation et après
+> chaque rotation.
+
+> ## 🛡️ Un VPS compromis peut détruire les sauvegardes : instantanés Storage Box obligatoires
+>
+> Pour sauvegarder, le VPS détient une clé SSH qui **écrit** sur la Storage
+> Box. Un attaquant devenu root sur le VPS dispose donc de cette clé : c'est le
+> scénario du rançongiciel, qui chiffre les sites **puis efface le dépôt
+> restic** pour empêcher toute reprise.
+>
+> La mitigation est l'**activation des instantanés automatiques de la Storage
+> Box**, dans la console Hetzner. Ils sont pris et supprimés par Hetzner ; le
+> sous-compte SFTP du VPS ne peut ni les lister ni les supprimer. Ils restent
+> donc hors de portée d'une compromission du VPS, et le dépôt se restaure
+> depuis celui de la veille.
+>
+> Ce n'est pas une option : c'est l'**étape 0** de
+> [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md), à faire **avant la première
+> sauvegarde**. Elle ne tient qu'à deux conditions : les identifiants de la
+> console Hetzner et de l'API Robot ne sont **jamais** sur le VPS, et le compte
+> Hetzner est protégé par une double authentification.
 
 ---
 
 ## Fonctionnement
 
 ```
-  03:15 Europe/Paris ─ alivaon-backup.timer
-                              │
-                    alivaon-backup.service ── échec ──► alivaon-backup-failure.service
-                              │                          journal (err) + healthchecks /fail
-                         backup.sh
-                              │
-      ┌───────────────────────┴───────────────────────┐
-      │ pour production, puis staging :               │
-      │  1. mysqldump --single-transaction            │
-      │     (dans le conteneur MySQL)                 │
-      │  2. restic backup : dump + volumes            │──► dépôt restic chiffré
-      │     étiquettes env:<env>, kind:scheduled      │    (Storage Box SFTP ou S3)
-      └───────────────────────┬───────────────────────┘
-                              │
-             3. restic forget --prune (7 j / 4 sem / 6 mois)
-                              │
-                     healthchecks /0 (succès) ou /<code>
+  CHAQUE NUIT, 03:15 Europe/Paris ── alivaon-backup.timer
+  alivaon-backup.service ─► backup.sh
+      pour production, puis staging :
+        1. mysqldump --single-transaction, utilisateur MySQL `backup`,
+           dans le conteneur, par socket
+        2. restic backup : dump + volumes ──────────► dépôt restic chiffré
+           étiquettes env:<env>, kind:scheduled        (Storage Box SFTP)
+      3. restic forget --prune (7 j / 4 sem / 6 mois)        │ instantanés
+      4. healthchecks /0, ou /<code> en cas d'échec          │ Storage Box
+                                                             │ quotidiens,
+  CHAQUE DIMANCHE, 11:15 ── alivaon-backup-verify.timer      │ pilotés par
+  alivaon-backup-verify.service ─► verify.sh                 │ Hetzner, hors
+      --read-data-rotation : restic check + relecture de     │ de portée
+      1/8 des données (tournante), inventaire, fraîcheur     ▼ du VPS
+
+  ÉCHEC de l'un ou l'autre service ─► alivaon-backup-failure.service
+      journal (priorité err, unité fautive) + healthchecks /fail
 ```
 
 **Un dépôt, deux environnements séparés.** Chaque exécution produit un
@@ -58,15 +78,54 @@ production.
 
 **Rétention**, appliquée à chaque environnement séparément
 (`--group-by host,tags`) : 7 quotidiennes, 4 hebdomadaires, 6 mensuelles, soit
-environ 17 instantanés et six mois d'historique.
+environ 17 instantanés et six mois d'historique, pour toutes les données, base
+et fichiers.
+
+**Contrôle hebdomadaire.** `restic check` seul vérifie la structure du dépôt
+(index, arbres) mais ne lit **aucune** donnée : un bloc corrompu sur le
+stockage passerait inaperçu jusqu'au jour de la restauration. Chaque dimanche,
+`verify.sh --read-data-rotation` relit et déchiffre en plus 1/8 du dépôt, une
+fraction différente chaque semaine ISO : l'intégralité est relue en huit
+semaines, soit environ deux mois.
 
 ### Ce qui est sauvegardé
 
 | Élément | Comment |
 |---|---|
-| Base `alivaon_db` (production, staging) | `mysqldump --single-transaction` dans le conteneur, dump SQL non compressé : restic compresse et déduplique mieux que gzip, qui casserait la déduplication d'un jour à l'autre |
+| Base `alivaon_db` (production, staging) | `mysqldump` dans le conteneur, par l'utilisateur dédié `backup` (voir ci-dessous). Dump SQL non compressé : restic compresse et déduplique mieux que gzip, qui casserait la déduplication d'un jour à l'autre |
 | Uploads VichUploader (`public/uploads`) | Volume Docker, chemin demandé à Docker à chaque exécution |
-| CV des candidats (`var/private`) | Idem. Données personnelles : voir « Limites » |
+| CV des candidats (`var/private`) | Idem |
+
+**Le dump MySQL.** Il est exécuté par un utilisateur dédié
+`'backup'@'localhost'`, un par environnement, qui ne détient que `SELECT, SHOW
+VIEW, TRIGGER` sur `alivaon_db` : aucun privilège global. La sauvegarde ne
+dépend donc pas des privilèges de l'application, qui restent minimaux ;
+l'utilisateur applicatif ne sert plus qu'à la restauration. `LOCK TABLES` et
+`PROCESS` ne sont pas accordés, les options ci-dessous les rendent inutiles ;
+`RELOAD` non plus, il ne sert qu'à `--flush-logs` et `--source-data`, non
+utilisés. Si un dump d'essai prouvait le contraire, l'étape 3.3 du runbook dit
+lequel ajouter, un à la fois.
+
+**Mode de connexion : socket.** mysqldump s'exécute dans le conteneur MySQL
+(`docker exec`) et s'y connecte par socket Unix, imposé par `protocol=socket`.
+MySQL évalue cette connexion comme venant de `localhost` : d'où le compte
+`'backup'@'localhost'`. Une connexion TCP serait évaluée comme
+`'backup'@'127.0.0.1'` et refusée. `tests/run.sh` vérifie que le mode du
+script et l'hôte du compte documenté dans le runbook s'accordent.
+
+Options :
+
+| Option | Pourquoi |
+|---|---|
+| `--single-transaction` | Instantané cohérent des tables InnoDB, sans verrou : `LOCK TABLES` inutile |
+| `--quick` | Lignes écrites au fil de l'eau, sans tout charger en mémoire |
+| `--routines`, `--triggers` | Aucune routine attendue, mais une routine ajoutée plus tard ne serait pas perdue en silence |
+| `--no-tablespaces` | N'interroge pas `INFORMATION_SCHEMA.FILES`, qui exige `PROCESS` depuis MySQL 8.0.21 : `PROCESS` inutile |
+| `--default-character-set=utf8mb4` | **Pas cosmétique** : un dump dans un autre encodage altère le contenu français accentué, et le défaut ne se voit qu'à la restauration |
+| `--hex-blob`, `--set-gtid-purged=OFF`, `--databases --add-drop-database` | Binaires insensibles à l'encodage, dump rejouable sans `SUPER`, base recréée à l'identique |
+
+Tout message de mysqldump sur sa sortie d'erreur est journalisé, horodaté, en
+priorité « alerte ».
 
 ### Ce qui ne l'est PAS
 
@@ -84,16 +143,21 @@ environ 17 instantanés et six mois d'historique.
 
 | Fichier du dépôt | Installé sur le VPS | Rôle |
 |---|---|---|
+| `install.sh` | — (exécuté depuis la copie du dépôt) | Installation et mise à jour idempotentes, `--check` pour comparer serveur et dépôt |
 | `backup.sh` | `/usr/local/lib/alivaon-backup/` | Dump, sauvegarde, rétention. Lancé par le timer |
 | `restore.sh` | idem | Restauration paramétrée, confirmée, avec garde-fous |
-| `verify.sh` | idem | `restic check`, inventaire, fraîcheur < 48 h |
+| `verify.sh` | idem | `restic check` (avec relecture tournante), inventaire, fraîcheur < 48 h |
 | `restic.sh` | idem | restic avec la configuration chargée, pour les opérations manuelles |
-| `notify-failure.sh` | idem | Appelé par le service d'échec |
+| `notify-failure.sh` | idem | Appelé par le service d'échec, identifie l'unité fautive |
 | `lib.sh` | idem | Fonctions communes (sourcé) |
 | `alivaon-backup.service` | `/etc/systemd/system/` | Exécution de `backup.sh` |
 | `alivaon-backup.timer` | idem | Chaque nuit à 03:15, heure de Paris |
-| `alivaon-backup-failure.service` | idem | Notification d'échec (`OnFailure=`) |
+| `alivaon-backup-verify.service` | idem | Exécution de `verify.sh --read-data-rotation` |
+| `alivaon-backup-verify.timer` | idem | Chaque dimanche à 11:15, heure de Paris |
+| `alivaon-backup-failure.service` | idem | Notification d'échec des deux services (`OnFailure=`) |
 | `.env.example` | → `/etc/alivaon-backup/backup.env` | Gabarit documenté de la configuration |
+| `tests/` | — | Suite de tests hors serveur : `backup/tests/run.sh` sur le Mac |
+| `.shellcheckrc` | — | Règles shellcheck optionnelles écartées, avec leur justification |
 | `RUNBOOK-BACKUP.md` | — | Mise en place pas à pas |
 | `RUNBOOK-RESTORE-TEST.md` | — | Tests de restauration et critères de réussite |
 
@@ -101,23 +165,38 @@ Sur le VPS, en dehors des scripts :
 
 | Chemin | Contenu | Droits |
 |---|---|---|
-| `/etc/alivaon-backup/backup.env` | Configuration, mots de passe MySQL | `root:root 600` |
-| `/etc/alivaon-backup/restic-password` | Mot de passe du dépôt | `root:root 400` |
+| `/etc/alivaon-backup/` | Configuration et secrets | `root:root 700` |
+| `/etc/alivaon-backup/backup.env` | Configuration, mots de passe MySQL (`backup` et applicatif) | `root:root 600` |
+| `/etc/alivaon-backup/restic-password` | Mot de passe du dépôt | `root:root 600` |
 | `/etc/alivaon-backup/ssh/` | Clé SSH et `known_hosts` de la Storage Box | `root:root 700` |
 | `/etc/ssh/ssh_config.d/alivaon-backup.conf` | Alias `alivaon-storagebox` | `644`, sans secret |
 | `/var/lib/alivaon-backup/` | Dumps pendant la sauvegarde, extraction pendant la restauration. **Vide au repos** | `700` |
 | `/var/cache/alivaon-backup/` | Cache restic (métadonnées chiffrées) | `700` |
 
 Les scripts refusent de démarrer si la configuration ou le mot de passe sont
-lisibles par un autre utilisateur que root.
+lisibles par un autre utilisateur que root. `install.sh` pose ces droits et les
+rétablit s'ils ont dérivé.
 
 ---
 
 ## Installation
 
-Suivre [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md) de bout en bout. Il commence par
-la liste des **hypothèses** déduites des fichiers compose, et leur contrôle sur
-le serveur.
+Suivre [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md) de bout en bout, dans cet ordre :
+
+1. instantanés automatiques de la Storage Box **activés** ;
+2. mot de passe restic dans le gestionnaire, dépôt créé depuis le Mac ;
+3. **test 0** : le dépôt s'ouvre depuis le Mac avec la seule copie du
+   gestionnaire ;
+4. étape 2 : vérification des noms (conteneurs, volumes) sur le VPS ;
+5. utilisateurs MySQL `backup` créés, dump d'essai ;
+6. `install.sh` ;
+7. première sauvegarde manuelle ;
+8. `systemd-analyze verify` ;
+9. activation des timers ;
+10. **test de restauration complet sur le staging.**
+
+**La mise en place n'est terminée qu'au point 10**, quand les critères du test
+de restauration sont tous verts. Des timers actifs ne prouvent rien.
 
 ---
 
@@ -127,26 +206,34 @@ Toutes les commandes se lancent **sur le VPS**.
 
 | Besoin | Commande |
 |---|---|
-| Prochaine exécution | `systemctl list-timers alivaon-backup.timer` |
+| Prochaines exécutions | `systemctl list-timers 'alivaon-backup*'` |
 | Journal de la dernière sauvegarde | `sudo journalctl -u alivaon-backup.service -n 80 --no-pager` |
-| Uniquement les erreurs | `sudo journalctl -u alivaon-backup.service -p err --since -7d` |
+| Journal du dernier contrôle hebdomadaire | `sudo journalctl -u alivaon-backup-verify.service -n 60 --no-pager` |
+| Uniquement les erreurs | `sudo journalctl -u 'alivaon-backup*' -p err --since -7d` |
 | Sauvegarder maintenant | `sudo systemctl start alivaon-backup.service` |
-| Contrôle de santé | `sudo /usr/local/lib/alivaon-backup/verify.sh` |
-| Contrôle approfondi (relit 5 % des données) | `sudo /usr/local/lib/alivaon-backup/verify.sh --read-data-subset 5%` |
+| Contrôle rapide (structure, inventaire, fraîcheur) | `sudo /usr/local/lib/alivaon-backup/verify.sh` |
+| Contrôle hebdomadaire maintenant (relit 1/8 des données) | `sudo systemctl start alivaon-backup-verify.service` |
+| Relecture d'un échantillon aléatoire | `sudo /usr/local/lib/alivaon-backup/verify.sh --read-data-subset 5%` |
 | Inventaire | `sudo /usr/local/lib/alivaon-backup/restore.sh --list` |
 | Occupation du dépôt | `sudo /usr/local/lib/alivaon-backup/restic.sh stats --mode raw-data` |
+| Serveur conforme au dépôt ? | `sudo ~/alivaon-backup-src/install.sh --check` (après `rsync`, voir l'annexe du runbook) |
 
-**Rythme conseillé** : `verify.sh` chaque semaine, `--read-data-subset 5%`
-chaque mois, Test 1 du runbook de restauration chaque mois, Test 2 chaque
-trimestre.
+**Rythme** : la sauvegarde chaque nuit et le contrôle chaque dimanche sont
+automatiques. À la main : test 1 du runbook de restauration chaque mois,
+test 2 chaque trimestre, `install.sh --check` après toute intervention sur le
+serveur.
+
+Le contrôle de fraîcheur de `verify.sh` ne tourne qu'une fois par semaine ;
+au jour le jour, c'est healthchecks.io qui détecte une sauvegarde manquante.
 
 ### Alertes
 
 - **healthchecks.io** (si `HC_PING_URL` est renseigné) : alerte sur échec
   **et** sur absence d'exécution. Le second cas n'est détectable que par ce
-  moyen.
-- **Journal** : tout échec est journalisé en priorité `err` par
-  `alivaon-backup-failure.service`.
+  moyen. Un échec du contrôle hebdomadaire est signalé sur le même check.
+- **Journal** : tout échec de la sauvegarde **ou** du contrôle hebdomadaire
+  est journalisé en priorité `err` par `alivaon-backup-failure.service`, avec
+  le nom de l'unité fautive et les dernières lignes de son exécution.
 
 ### Restaurer
 
@@ -172,20 +259,28 @@ Le conteneur applicatif est arrêté pendant l'écriture, puis redémarré par
 | production → staging | Refus, sauf `--allow-production-to-staging` (copie de données personnelles en préprod) |
 | Étiquette et manifeste discordants | Refus, code 3 |
 | Pas de terminal | Refus : la confirmation est toujours interactive |
+| Volume absent, ou pilote autre que `local` (H9) | Refus, avant toute écriture |
 
 ### Perte totale du VPS
 
 1. Reconstruire le serveur selon le README racine (« Reconstruire le VPS depuis
    zéro »), jusqu'au `docker compose up -d` des deux stacks. Les volumes et les
    bases vides sont alors créés.
-2. [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md), étapes 3 à 8, avec le mot de passe
-   **du gestionnaire** et le **même** `RESTIC_HOST`. À l'étape 9,
-   `cat config` doit afficher le dépôt existant : **ne jamais lancer `init`**.
-3. **Ne pas activer le timer** (étape 13) avant la restauration. Une sauvegarde
-   d'un serveur vide prendrait place dans la rétention.
+2. [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md), étapes 3 à 7 : utilisateurs MySQL
+   `backup` recréés avec les mots de passe **du gestionnaire** (les comptes
+   MySQL ne sont pas dans le dump), outils, `install.sh`, accès SSH,
+   configuration avec le mot de passe restic **du gestionnaire** et le
+   **même** `RESTIC_HOST`. `cat config` doit afficher le dépôt existant :
+   **ne jamais lancer `init`**.
+3. **Ne pas activer les timers** (étape 10) avant la restauration. Une
+   sauvegarde d'un serveur vide prendrait place dans la rétention.
 4. `sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --no-safety-snapshot`
 5. Vérifier le site, puis faire de même avec `--target staging`.
-6. Activer le timer, puis lancer `verify.sh`.
+6. Étapes 8 à 10 du runbook : sauvegarde manuelle, contrôle des unités,
+   timers.
+
+Si le dépôt lui-même a été effacé (compromission du VPS), le restaurer d'abord
+depuis un instantané de la Storage Box, dans la console Hetzner.
 
 ---
 
@@ -204,7 +299,7 @@ que la nouvelle ouvre le dépôt depuis le Mac.
    gestionnaire, **à côté** de l'ancien :
    `openssl rand -base64 48 | tr -d '\n' | pbcopy`
 2. **[VPS]** Suspendre la planification :
-   `sudo systemctl stop alivaon-backup.timer`
+   `sudo systemctl stop alivaon-backup.timer alivaon-backup-verify.timer`
 3. **[VPS]** Déposer le nouveau mot de passe (coller, Entrée, Ctrl-D) :
    `sudo sh -c 'umask 077; cat > /etc/alivaon-backup/restic-password.new'`
 4. **[VPS]** Ajouter la clé :
@@ -212,7 +307,7 @@ que la nouvelle ouvre le dépôt depuis le Mac.
 5. **[VPS]** Noter l'ID de l'**ancienne** clé, marquée `*` (celle qui a ouvert
    le dépôt) : `sudo /usr/local/lib/alivaon-backup/restic.sh key list`
 6. **[VPS]** Basculer :
-   `sudo install -o root -g root -m 0400 /etc/alivaon-backup/restic-password.new /etc/alivaon-backup/restic-password`
+   `sudo install -o root -g root -m 0600 /etc/alivaon-backup/restic-password.new /etc/alivaon-backup/restic-password`
    puis `sudo rm /etc/alivaon-backup/restic-password.new`
 7. **[VPS]** Contrôler : `sudo /usr/local/lib/alivaon-backup/restic.sh key list`
    (la clé `*` est maintenant la nouvelle), puis `verify.sh`.
@@ -221,7 +316,8 @@ que la nouvelle ouvre le dépôt depuis le Mac.
    toujours valide.
 9. **[VPS]** Retirer l'ancienne clé :
    `sudo /usr/local/lib/alivaon-backup/restic.sh key remove <ID_ANCIENNE_CLÉ>`
-10. **[VPS]** Reprendre : `sudo systemctl start alivaon-backup.timer`
+10. **[VPS]** Reprendre :
+    `sudo systemctl start alivaon-backup.timer alivaon-backup-verify.timer`
 11. **[MAC]** Supprimer l'ancien mot de passe du gestionnaire.
 
 **Limite.** La clé maîtresse ne change pas. Si l'ancien mot de passe **et** une
@@ -233,8 +329,9 @@ la recopie des instantanés (`restic copy`).
 
 | Secret | Rotation |
 |---|---|
-| Mot de passe MySQL applicatif | Le changer dans MySQL, dans le `.env` de la stack **et** dans `*_DB_PASSWORD` de `backup.env`. Sinon, la sauvegarde échoue dès la nuit suivante |
-| Clé SSH de la Storage Box | Nouvelle clé (étape 5 du runbook), dépôt, test `sftp -b -`, retrait de l'ancienne dans `.ssh/authorized_keys` du sous-compte |
+| Mot de passe MySQL `backup` | Nouveau mot de passe dans le gestionnaire, `ALTER USER 'backup'@'localhost' IDENTIFIED BY ...` (étape 3 du runbook), puis `*_BACKUP_DB_PASSWORD` dans `backup.env`. Sinon, la sauvegarde échoue dès la nuit suivante, bruyamment |
+| Mot de passe MySQL applicatif | Le changer dans MySQL, dans le `.env` de la stack **et** dans `*_DB_PASSWORD` de `backup.env`. Sinon, c'est la **restauration** qui échouera, le jour où elle sera nécessaire : le test 1 mensuel le détecte |
+| Clé SSH de la Storage Box | Nouvelle clé (étape 6 du runbook), dépôt, test `sftp -b -`, retrait de l'ancienne dans `.ssh/authorized_keys` du sous-compte |
 | Clés S3 | Créer, remplacer dans `backup.env`, `verify.sh`, révoquer l'ancienne |
 
 ---
@@ -262,31 +359,56 @@ environ 7 Go d'uploads + 1,4 Go de dumps ≈ **9 Go**, moins de 1 % d'une BX11. 
 ce volume, **le coût est le forfait fixe**, soit environ 40 € HT par an. Les
 tailles réelles se mesurent à l'étape 2 du runbook ; l'occupation effective
 avec `restic.sh stats --mode raw-data`. Les instantanés de la Storage Box
-consomment aussi de l'espace sur le quota.
+consomment aussi de l'espace sur le quota : les données purgées par restic y
+subsistent jusqu'à l'expiration de l'instantané qui les contient.
+
+La relecture hebdomadaire télécharge 1/8 du dépôt, soit environ 1,1 Go dans
+l'exemple ci-dessus : sans coût sur une Storage Box, et dans le trafic inclus
+d'Object Storage.
+
+---
+
+## Données des candidats
+
+Les données des candidats, base comme fichiers (`cv_private`), suivent la
+**rétention générale** (7 quotidiennes, 4 hebdomadaires, 6 mensuelles), comme
+le reste. C'est un choix d'exploitation lié à la reprise d'activité : une
+sauvegarde sert à reprendre après un incident, pas à archiver. Aucune purge
+sélective n'est en place. Une éventuelle anonymisation relèvera de
+l'application, dans un chantier distinct.
+
+Si la décision changeait et qu'il fallait conserver certains fichiers moins
+longtemps que le reste, le moyen serait `restic rewrite --exclude <chemin du
+volume> --forget`, appliqué chaque nuit aux instantanés plus anciens que la
+durée voulue, avant la purge. restic applique sa rétention à des instantanés
+entiers : c'est la seule manière de retirer un chemin d'un instantané existant.
+`restore.sh` devrait alors savoir qu'un volume cité par le manifeste peut être
+absent de l'instantané, et laisser intact le volume cible plutôt que de le
+vider par `rsync --delete`. Rien de cela n'est codé.
 
 ---
 
 ## Limites connues
 
-- **Un VPS compromis peut effacer le dépôt.** Il détient la clé SSH ou les clés
-  S3 en écriture. Parade : les instantanés automatiques de la Storage Box
-  (étape 0 du runbook), inaccessibles au sous-compte. Sur S3, activer le
-  versioning ou l'Object Lock du bucket.
+- **Un VPS compromis détient la clé d'écriture sur le dépôt.** Mitigation :
+  instantanés de la Storage Box, obligatoires (voir en tête). Sur S3, activer
+  le versioning ou l'Object Lock du bucket.
 - **Cohérence base / fichiers.** Le dump précède les fichiers de quelques
   secondes à quelques minutes. Un fichier téléversé entre les deux figure dans
   la sauvegarde sans ligne en base : orphelin inoffensif. L'ordre inverse
   aurait produit des lignes pointant vers des fichiers absents.
-- **RGPD.** Un CV supprimé de l'application reste jusqu'à six mois dans les
-  sauvegardes (rétention mensuelle). À déclarer dans le registre des
-  traitements et la politique de confidentialité, ou à exclure (retirer
-  `cv_private=...` des `*_VOLUMES`).
-- **Mot de passe MySQL en double.** `backup.env` recopie `MYSQL_PASSWORD` des
-  stacks. Une divergence fait échouer la sauvegarde bruyamment, jamais en
-  silence.
+- **Mot de passe MySQL applicatif en double.** `backup.env` recopie
+  `MYSQL_PASSWORD` des stacks pour `restore.sh`. Une divergence ne gêne pas
+  la sauvegarde, mais fait échouer la restauration : le test 1 mensuel la
+  détecte.
+- **Pilote `local` requis** pour chaque volume sauvegardé (hypothèse H9),
+  vérifié à chaque exécution : un volume d'un autre pilote est refusé, la
+  sauvegarde échoue plutôt que d'archiver un dossier vide.
 - **restic ≥ 0.16 requis** (`--retry-lock`, dépôt compressé). Vérifié au
   démarrage de chaque script.
-- **Pas de comparaison automatique** avec le dépôt Git : `scripts/diff-vps.sh`
-  ne couvre que `/opt/alivaon`. Contrôle manuel : étape 16 du runbook.
+- **Comparaison avec le dépôt Git à la demande** : `scripts/diff-vps.sh` ne
+  couvre que `/opt/alivaon` ; pour le dispositif de sauvegarde, c'est
+  `install.sh --check` (annexe du runbook), non planifié.
 
 ---
 
@@ -297,3 +419,5 @@ consomment aussi de l'espace sur le quota.
 | `backup.sh` | succès complet | une étape a échoué | — | — |
 | `restore.sh` | restauration terminée | échec (le journal dit si la cible a été modifiée) | — | refus de sécurité |
 | `verify.sh` | dépôt sain et à jour | `restic check` en échec | sauvegarde trop ancienne ou absente | — |
+| `install.sh` | installation conforme ; en `--check`, identique au dépôt | erreur ; en `--check`, au moins un écart | — | — |
+| `tests/run.sh` | tous les cas réussis | au moins un échec | — | — |
