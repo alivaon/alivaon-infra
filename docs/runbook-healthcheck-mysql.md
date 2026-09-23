@@ -59,6 +59,90 @@ connecte, lui, par socket (backup/RUNBOOK-BACKUP.md, étape 3).
 
 ---
 
+## Retour arrière — à lire AVANT de commencer
+
+Le retour arrière est écrit ici, avant la séquence de déploiement, pour ne
+jamais être improvisé si une vérification échoue.
+
+**Règle.** Dans chaque environnement, la copie horodatée de
+`docker-compose.yml` est créée **avant toute modification** : c'est le premier
+bloc des sections 2 et 3. Le bloc suivant l'affiche, et l'opérateur **note son
+nom exact** (`docker-compose.yml.bak-AAAAMMJJ-HHMMSS`) avant de poursuivre.
+Sans ce nom noté, ne pas aller plus loin.
+
+**Quand l'appliquer** : conteneur MySQL toujours pas `healthy` une minute
+après `docker compose up -d db` ; ou `curl` sur la production qui renvoie
+autre chose que `200` ; ou `check-staging-auth.sh` qui renvoie autre chose que
+`401` sur le staging.
+
+### Production [VPS]
+
+Remplacer `<horodatage>` par le nom noté à la section 3.
+
+```bash
+cd /opt/alivaon/production && cp -p docker-compose.yml.bak-<horodatage> docker-compose.yml && docker compose up -d db
+```
+
+**Effet** : remet la définition d'origine du service `db`, puis recrée le
+conteneur avec l'ancien healthcheck. Nouvelle coupure de 20 à 40 s. Les `&&`
+sont voulus, par exception à la règle d'une commande par bloc :
+`docker compose up` ne s'exécute que si la recopie du fichier a réussi.
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' production-db-1
+```
+
+**Vérifier** : `healthy`. `starting` : attendre 30 secondes et relancer.
+
+**[MAC]**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://www.alivaon.com/
+```
+
+**Vérifier** : `200`.
+
+### Staging [VPS]
+
+Remplacer `<horodatage>` par le nom noté à la section 2.
+
+```bash
+cd /opt/alivaon/staging && cp -p docker-compose.yml.bak-<horodatage> docker-compose.yml && docker compose up -d db
+```
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' staging-db-1
+```
+
+**Vérifier** : `healthy`.
+
+**[MAC]**
+
+```bash
+./scripts/check-staging-auth.sh
+```
+
+**Vérifier** : code 0, `401`. Le staging est protégé par BasicAuth : un `curl`
+sans identifiants y renvoie `401`, pas `200`.
+
+### Après un retour arrière
+
+- Le mot de passe root de MySQL redevient visible dans `ps` : situation à ne
+  maintenir que le temps de comprendre l'échec.
+- `scripts/diff-vps.sh` signale de nouveau un écart sur le fichier compose
+  concerné : c'est attendu.
+
+### Cache LiipImagine : pas d'effet
+
+Recréer le conteneur `db` ne touche pas le cache LiipImagine : il vit dans
+`public/media/cache`, dans la couche du **conteneur applicatif**, et non dans
+un volume. En revanche, toute recréation du conteneur applicatif (nouvelle
+image, `docker compose up -d app`) vide ce cache : les premières visites
+régénèrent alors les variantes d'images. C'est une information, pas un
+problème.
+
+---
+
 ## 1. Constater l'écart [MAC]
 
 ```bash
@@ -79,8 +163,15 @@ l'expliquer d'abord.
 cp -p /opt/alivaon/staging/docker-compose.yml /opt/alivaon/staging/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
 ```
 
-**Effet** : copie horodatée de la version en place, selon la convention du
-serveur.
+**Effet** : copie horodatée de la version en place, AVANT toute modification.
+
+```bash
+ls -l /opt/alivaon/staging/docker-compose.yml.bak-*
+```
+
+**Vérifier et noter** : la copie du jour figure dans la liste. **Noter son nom
+exact** : c'est celui du retour arrière (section « Retour arrière »). Ne pas
+poursuivre sans l'avoir noté.
 
 **[MAC]**
 
@@ -132,7 +223,7 @@ racine, « Pièges connus »).
 > **Barrière.** Passer à la production **uniquement** si les quatre
 > vérifications du staging sont vertes : `config --quiet` muet, healthcheck
 > sans `-p`, état `healthy`, `check-staging-auth.sh` à `401`. Sinon, retour
-> arrière du staging (en fin de document) et analyse avant toute nouvelle
+> arrière du staging (section « Retour arrière ») et analyse avant toute nouvelle
 > tentative.
 
 ## 3. Production, dans un créneau creux
@@ -142,6 +233,16 @@ racine, « Pièges connus »).
 ```bash
 cp -p /opt/alivaon/production/docker-compose.yml /opt/alivaon/production/docker-compose.yml.bak-$(date +%Y%m%d-%H%M%S)
 ```
+
+**Effet** : copie horodatée de la version en place, AVANT toute modification.
+
+```bash
+ls -l /opt/alivaon/production/docker-compose.yml.bak-*
+```
+
+**Vérifier et noter** : la copie du jour figure dans la liste. **Noter son nom
+exact** : c'est celui du retour arrière (section « Retour arrière »). Ne pas
+poursuivre sans l'avoir noté.
 
 **[MAC]**
 
@@ -201,9 +302,3 @@ commande `mysqladmin` portant un `-p`.
 ```
 
 **Vérifier** : `identique` pour les deux fichiers compose, code de sortie 0.
-
-## Retour arrière
-
-Recopier la copie `.bak-*` sur `docker-compose.yml`, puis
-`docker compose up -d db` dans le dossier de la stack. Le mot de passe root
-redevient visible dans `ps` : à ne faire que le temps de corriger.

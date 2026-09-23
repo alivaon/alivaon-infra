@@ -34,9 +34,9 @@ Valeurs à substituer, notées entre chevrons :
 | — | Dans la même fenêtre : correctif du healthcheck MySQL, staging puis production ([runbook dédié](../docs/runbook-healthcheck-mysql.md)) | Mac, VPS |
 | 3 | Utilisateurs MySQL `backup`, un par environnement, et dump d'essai | VPS |
 | 4 | restic et outils | VPS |
-| 5 | `install.sh` | Mac puis VPS |
+| 5 | Copie des sources sur le VPS | Mac |
 | 6 | Accès SSH du VPS à la Storage Box | VPS |
-| 7 | Configuration et mot de passe sur le VPS | VPS |
+| 7 | Mot de passe sur le VPS, **barrière de vérification**, `install.sh`, configuration | VPS |
 | 8 | Première sauvegarde manuelle | VPS |
 | 9 | `systemd-analyze verify` | VPS |
 | 10 | Activation des timers et du dead man's switch | VPS, navigateur |
@@ -712,16 +712,7 @@ dans le `PATH` de systemd comme dans celui du shell.
 
 ---
 
-## Étape 5 — Installation par install.sh [MAC, VPS]
-
-Les scripts s'installent dans `/usr/local/lib/alivaon-backup/`, en root, et
-**pas** dans `/opt/alivaon/`. Ce dossier appartient à `alivaondev` : un script
-qui s'y trouverait, exécuté chaque nuit en root, serait modifiable sans `sudo`.
-
-`install.sh` copie scripts et unités systemd, pose les droits, crée
-`/etc/alivaon-backup/` et `backup.env` s'ils manquent, recharge systemd. Il
-**n'active aucun timer** (étape 10) et n'écrase jamais la configuration ni le
-mot de passe.
+## Étape 5 — Copie des sources sur le VPS [MAC]
 
 **[MAC]**
 
@@ -736,32 +727,9 @@ du dépôt. La copie ne contient aucun secret ; la garder sert à `install.sh
 **Vérifier** : la liste transférée contient `install.sh`, les scripts et les
 cinq unités systemd.
 
-**[VPS]**
-
-```bash
-sudo ~/alivaon-backup-src/install.sh
-```
-
-**Effet** : installe tout ; à la première exécution, chaque fichier est signalé
-`installation : ...`, et `backup.env` `création ..., À RENSEIGNER`.
-L'avertissement `restic-password absent` est normal à ce stade (étape 7).
-**Vérifier** : dernière ligne `BILAN : N modification(s) appliquée(s)`, aucune
-ligne `[ERREUR]`.
-
-```bash
-sudo ~/alivaon-backup-src/install.sh
-```
-
-**Effet** : seconde exécution, pour constater l'idempotence.
-**Vérifier** : `BILAN : 0 modification(s) appliquée(s)`, aucun diff affiché.
-
-```bash
-ls -l /usr/local/lib/alivaon-backup/ /etc/systemd/system/alivaon-backup*
-```
-
-**Vérifier** : six fichiers dans `/usr/local/lib/alivaon-backup/` appartenant à
-`root` (`-rwxr-xr-x`, sauf `lib.sh` en `-rw-r--r--`), cinq unités `-rw-r--r--`
-appartenant à `root`.
+`install.sh` ne s'exécute **pas** ici, mais à l'étape 7.3 : **après** la
+barrière de vérification du mot de passe, pour qu'aucun composant ne soit
+installé tant que la preuve n'est pas faite que le VPS ouvre le bon dépôt.
 
 ---
 
@@ -769,8 +737,15 @@ appartenant à `root`.
 
 *Dépôt S3 (option B) : sauter cette étape, voir l'étape 7.*
 
-Le dossier `/etc/alivaon-backup/ssh/` a été créé en `0700` par `install.sh` à
-l'étape 5.
+```bash
+sudo install -d -o root -g root -m 0700 /etc/alivaon-backup /etc/alivaon-backup/ssh
+```
+
+**Effet** : crée les deux dossiers réservés à root. Idempotent. `install.sh`
+(étape 7.3) pose ensuite exactement ces mêmes droits, et les contrôle en
+`--check`.
+**Vérifier** : `sudo stat -c '%U:%G %a %n' /etc/alivaon-backup /etc/alivaon-backup/ssh`
+affiche deux fois `root:root 700`.
 
 ```bash
 sudo ssh-keygen -t ed25519 -N '' -C 'alivaon-backup@vps' -f /etc/alivaon-backup/ssh/id_ed25519
@@ -842,7 +817,9 @@ la clé n'est pas acceptée, recommencer le bloc précédent.
 
 ---
 
-## Étape 7 — Configuration et mot de passe sur le VPS [VPS]
+## Étape 7 — Mot de passe, barrière, installation et configuration [VPS]
+
+### 7.1 — Mot de passe du dépôt
 
 ```bash
 sudo sh -c 'umask 077; cat > /etc/alivaon-backup/restic-password'
@@ -856,8 +833,112 @@ l'historique du shell ni dans `ps`.
 sudo stat -c '%U:%G %a %s octets' /etc/alivaon-backup/restic-password
 ```
 
-**Vérifier** : `root:root 600 65 octets` (64 caractères et le saut de ligne,
-que restic ignore).
+**Vérifier** : `root:root 600 65 octets` (64 caractères et le saut de ligne).
+
+### 7.2 — Barrière : ce fichier ouvre-t-il le bon dépôt ? (OBLIGATOIRE)
+
+Le test 0 a prouvé que **la copie du gestionnaire** ouvre le dépôt depuis le
+Mac. Rien ne prouve encore que **le fichier déposé sur le VPS** contient la
+même valeur : le contrôle des 65 octets porte sur la taille, pas sur le
+contenu. Un espace en fin de ligne, une copie tronquée, un retour chariot
+Windows produiraient au mieux l'échec de la première sauvegarde, au pire,
+par une mauvaise manœuvre, la création d'un second dépôt.
+
+La commande ouvre le dépôt avec **exactement** ce fichier, par l'alias de
+l'étape 6. Elle ne passe pas par `restic.sh` : ce dernier exige une
+configuration complète, qui n'existe pas encore. `--no-cache` : rien n'est
+écrit sur le VPS.
+
+```bash
+sudo restic -r sftp:alivaon-storagebox:restic-alivaon --password-file /etc/alivaon-backup/restic-password --no-cache snapshots
+```
+
+**Effet** : ouvre le dépôt et lit l'inventaire des instantanés. restic ne peut
+rien lister sans déchiffrer la clé du dépôt : un succès prouve que le fichier
+contient le bon mot de passe.
+**Vérifier** : aucune erreur, et une liste **vide**. Le test 0 lit le dépôt
+sans rien y écrire : à ce stade, il ne contient aucun instantané.
+
+```bash
+sudo restic -r sftp:alivaon-storagebox:restic-alivaon --password-file /etc/alivaon-backup/restic-password --no-cache cat config
+```
+
+**Vérifier** : le champ `"id"` est **celui noté à l'étape 1** dans le
+gestionnaire. C'est la preuve que le VPS ouvre **le** dépôt, et non un autre.
+
+**Règle : l'étape 7.3 ne se franchit pas tant que ces deux commandes n'ont
+pas réussi.**
+
+**En cas d'échec, le problème est le fichier de mot de passe ou l'accès, pas
+le dispositif** : aucun script d'Alivaon n'intervient ici.
+
+| Message | Cause | Reprise |
+|---|---|---|
+| `wrong password or no key found` | Le fichier ne contient pas le mot de passe du dépôt : copie tronquée, caractère parasite, mauvaise entrée du gestionnaire | Contrôles ci-dessous, puis redéposer (7.1) et rejouer 7.2 |
+| `Is there a repository at the following location?`, ou `config file does not exist` | Le chemin du dépôt ou l'alias est faux (étape 6), **pas** le mot de passe | Revoir l'étape 6 et la valeur du chemin. **Ne jamais lancer `restic init`** : le dépôt existe, créé depuis le Mac |
+| `Permission denied`, `Host key verification failed` | Accès SSH (étape 6) | Rejouer les blocs de l'étape 6 |
+| Identifiant `"id"` différent de celui du gestionnaire | Un **autre** dépôt est ouvert | S'arrêter : le chemin du dépôt ne désigne pas celui du test 0 |
+
+Contrôles du fichier, **sans en afficher le contenu** :
+
+```bash
+sudo wc -c /etc/alivaon-backup/restic-password
+```
+
+**Vérifier** : `64` (mot de passe seul) ou `65` (avec le saut de ligne final
+que produit la saisie). Moins : copie tronquée. Plus : caractères parasites.
+
+```bash
+sudo grep -c $'\r' /etc/alivaon-backup/restic-password
+```
+
+**Vérifier** : `0`. Tout autre nombre : un retour chariot Windows s'est glissé
+dans la saisie.
+
+Reprise : redéposer le fichier par le premier bloc de 7.1, en collant **depuis
+le gestionnaire** puis Entrée et Ctrl-D, sans espace ni ligne en plus ; puis
+rejouer ces contrôles et les deux commandes de 7.2.
+
+### 7.3 — Installation par install.sh
+
+Les scripts s'installent dans `/usr/local/lib/alivaon-backup/`, en root, et
+**pas** dans `/opt/alivaon/`. Ce dossier appartient à `alivaondev` : un script
+qui s'y trouverait, exécuté chaque nuit en root, serait modifiable sans `sudo`.
+
+`install.sh` copie scripts et unités systemd, pose les droits (dont `0600` sur
+le fichier de mot de passe, sans en toucher le contenu), crée `backup.env`
+depuis le modèle s'il manque, recharge systemd. Il **n'active aucun timer**
+(étape 10) et n'écrase jamais la configuration ni le mot de passe.
+
+**[VPS]**
+
+```bash
+sudo ~/alivaon-backup-src/install.sh
+```
+
+**Effet** : installe tout ; à la première exécution, chaque fichier est signalé
+`installation : ...`, et `backup.env` `création ..., À RENSEIGNER`. Aucun
+avertissement `restic-password absent` ne doit apparaître : le fichier existe
+depuis 7.1.
+**Vérifier** : dernière ligne `BILAN : N modification(s) appliquée(s)`, aucune
+ligne `[ERREUR]`.
+
+```bash
+sudo ~/alivaon-backup-src/install.sh
+```
+
+**Effet** : seconde exécution, pour constater l'idempotence.
+**Vérifier** : `BILAN : 0 modification(s) appliquée(s)`, aucun diff affiché.
+
+```bash
+ls -l /usr/local/lib/alivaon-backup/ /etc/systemd/system/alivaon-backup*
+```
+
+**Vérifier** : six fichiers dans `/usr/local/lib/alivaon-backup/` appartenant à
+`root` (`-rwxr-xr-x`, sauf `lib.sh` en `-rw-r--r--`), cinq unités `-rw-r--r--`
+appartenant à `root`.
+
+### 7.4 — Configuration
 
 ```bash
 sudo nano /etc/alivaon-backup/backup.env
@@ -891,10 +972,9 @@ sudo /usr/local/lib/alivaon-backup/restic.sh cat config
 
 **Effet** : charge et valide la configuration (propriétaire, droits, variables
 obligatoires, format des volumes), puis lit la configuration du dépôt distant.
-**Vérifier** : un bloc JSON dont le champ `"id"` est **celui noté à l'étape 1**.
-Toute ligne `[ERREUR]` désigne la variable à corriger. `wrong password` : le
-fichier ne contient pas le mot de passe du gestionnaire, recommencer le
-premier bloc de cette étape.
+**Vérifier** : un bloc JSON dont le champ `"id"` est **celui noté à l'étape 1**,
+comme en 7.2 : la configuration désigne bien le dépôt éprouvé par la
+barrière. Toute ligne `[ERREUR]` désigne la variable à corriger.
 **Ne jamais lancer `restic init` depuis le VPS** : le dépôt existe déjà.
 
 ```bash
@@ -1078,7 +1158,8 @@ service.
 
 ## Annexe — Mettre à jour les scripts plus tard
 
-Après modification de `backup/` dans le dépôt :
+Après modification de `backup/` dans le dépôt (le mot de passe est déjà en
+place : la barrière 7.2 ne se rejoue qu'en cas de rotation) :
 
 **[MAC]**
 

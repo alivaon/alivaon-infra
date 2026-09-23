@@ -348,10 +348,11 @@ perdus. Les deux se défendent selon le scénario : le choix est donc
    bases vides sont alors créés.
 2. [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md), étapes 3 à 7 : utilisateurs MySQL
    `backup` recréés avec les mots de passe **du gestionnaire** (les comptes
-   MySQL ne sont pas dans le dump), outils, `install.sh`, accès SSH,
-   configuration avec le mot de passe restic **du gestionnaire** et le
-   **même** `RESTIC_HOST`. `cat config` doit afficher le dépôt existant :
-   **ne jamais lancer `init`**.
+   MySQL ne sont pas dans le dump), outils, copie des sources, accès SSH,
+   mot de passe restic **du gestionnaire** et **barrière 7.2** (le dépôt
+   existant doit s'ouvrir, avec l'identifiant du gestionnaire),
+   `install.sh`, configuration avec le **même** `RESTIC_HOST`. **Ne jamais
+   lancer `init`**.
 3. **Ne pas activer les timers** (étape 10) avant la restauration. Une
    sauvegarde d'un serveur vide prendrait place dans la rétention.
 4. `sudo /usr/local/lib/alivaon-backup/restore.sh --target production --snapshot latest --no-safety-snapshot --stop-app --mirror`
