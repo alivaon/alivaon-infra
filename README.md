@@ -633,6 +633,12 @@ chantiers ouverts.
   [backup/RUNBOOK-RESTORE-TEST.md](backup/RUNBOOK-RESTORE-TEST.md)
 - [docs/runbook-healthcheck-mysql.md](docs/runbook-healthcheck-mysql.md) —
   déploiement du healthcheck MySQL sans mot de passe root
+- [docs/journal-installation-sauvegarde.md](docs/journal-installation-sauvegarde.md) —
+  journal de la mise en service de la sauvegarde, dont la topologie constatée
+  le 2026-09-23
+- [docs/chantiers-suivants.md](docs/chantiers-suivants.md) — travaux
+  identifiés hors des chantiers en cours, dont le site client `liens-canins`,
+  ni versionné ni sauvegardé
 
 ## Portée de ce dépôt
 

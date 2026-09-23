@@ -46,10 +46,12 @@ connecte, lui, par socket (backup/RUNBOOK-BACKUP.md, étape 3).
   (03:15–04:00) et hors du contrôle hebdomadaire (dimanche 11:15–11:30).
 - **Grouper avec l'installation des sauvegardes.** Plutôt que d'interrompre la
   base deux fois, dérouler ce runbook dans la même fenêtre que
-  [backup/RUNBOOK-BACKUP.md](../backup/RUNBOOK-BACKUP.md), entre son étape 2
-  (contrôle des noms) et son étape 3 (comptes MySQL). La première sauvegarde
-  porte ainsi sur les conteneurs définitifs, et une seule coupure est à
-  annoncer.
+  [backup/RUNBOOK-BACKUP.md](../backup/RUNBOOK-BACKUP.md), à la place que lui
+  donne son tableau « Ordre d'exécution » : après la barrière du mot de passe
+  (étape 7.2), avant la confirmation de la topologie (étape 2, rejouée) et
+  les comptes MySQL (étape 3). La première sauvegarde porte ainsi sur les
+  conteneurs définitifs, et une seule coupure est à annoncer. Les noms de
+  conteneurs ne changent pas ; l'étape 2 rejouée le confirme.
 - Le conteneur garde son nom (`production-db-1`, `staging-db-1`) et son
   réseau : Adminer, qui s'y réfère par ce nom, n'est pas affecté.
 - Tant que ce runbook n'a pas été déroulé, `scripts/diff-vps.sh` signale un
