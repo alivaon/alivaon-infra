@@ -255,22 +255,60 @@ Avant d'écraser, `restore.sh` archive l'état courant de la cible
 rsync réécrit les volumes depuis l'hôte, et un téléversement concurrent
 pourrait être écrasé ou produire un état mêlant deux moments. S'il tourne,
 `restore.sh` refuse et dit quoi arrêter, sauf **`--stop-app`** : il est alors
-arrêté juste avant l'écriture et **redémarré ensuite, même en cas d'échec**
-(trap), par `docker start`, jamais `docker compose up`. Arrêté au départ, il
-reste arrêté. Le conteneur MySQL n'est jamais arrêté : la base est restaurée
-par import, à travers lui.
+arrêté juste avant l'écriture et redémarré à la fin, par `docker start`,
+jamais `docker compose up`. Arrêté au départ, il reste arrêté dans tous les
+cas. Le conteneur MySQL n'est jamais arrêté : la base est restaurée par
+import, à travers lui.
+
+**Après un échec**, tout dépend du point de bascule `écriture entamée`, posé
+juste avant l'import de la base ou le rsync d'un volume. Échec **avant** : la
+cible est intacte, le conteneur applicatif retrouve son état initial (arrêté
+par `--stop-app`, il est redémarré). Échec **après** : la cible est dans un
+état intermédiaire et le conteneur reste **arrêté**, pour ne pas servir ni
+écrire des données incohérentes ; le journal dit comment terminer ou annuler
+(RUNBOOK-RESTORE-TEST.md, « Que faire dans le second cas »).
 
 **Propriété et droits.** Les fichiers doivent appartenir à l'UID sous lequel
 PHP-FPM écrit (`<ENV>_APP_OWNER`, `82:82`), sans quoi la restauration paraît
 réussie et le premier téléversement échoue plus tard. La chaîne conserve les
 UID/GID **numériques** de bout en bout : `restic backup` et `restic restore`
-en root, puis `rsync -aH --numeric-ids` en root. `restore.sh` le vérifie :
+en root, puis `rsync -aHAX --numeric-ids` en root, qui restaure aussi ACL
+(`-A`) et attributs étendus (`-X`). `restore.sh` le vérifie :
 
 - **avant** l'écriture, la racine de chaque volume doit, dans l'instantané,
   appartenir à `<ENV>_APP_OWNER` ; sinon refus, rien n'est modifié ;
 - **après** l'écriture, propriétaire, groupe et droits de **chaque** fichier
   restauré sont comparés à ceux enregistrés dans l'instantané ; au moindre
   écart, échec avec la liste des fichiers en cause.
+
+**ACL et attributs étendus.** Avant d'écrire, `restore.sh` vérifie que le
+rsync du serveur prend en charge `-A` et `-X`. Si le système de fichiers
+cible refuse une ACL ou un attribut présent dans l'instantané, rsync le
+signale et `restore.sh` s'arrête avec un message explicite, plutôt que de les
+perdre en silence. L'état de départ des volumes est constaté à l'étape 2 du
+runbook (`getfacl`, `getfattr`).
+
+**Espace disque.** `restic restore` extrait d'abord l'instantané dans un
+dossier de travail (`/var/lib/alivaon-backup/restore/`), puis rsync copie
+vers les volumes : une restauration demande environ **deux fois** la taille
+des données si les deux sont sur le même système de fichiers. Avant toute
+écriture, `restore.sh` estime cette taille depuis l'instantané (fichiers des
+volumes restaurés, et dump SQL), la majore de `RESTORE_SPACE_MARGIN_PERCENT`
+(20 % par défaut), et la compare à l'espace libre de chaque système de
+fichiers concerné : celui du dossier de travail, et celui des volumes s'il
+est distinct ; sur un même système de fichiers, les besoins s'additionnent.
+Le contrôle a lieu avant l'extraction, puis de nouveau pour les volumes juste
+avant d'écrire, application arrêtée. En cas de manque, refus chiffré :
+
+```
+espace disque insuffisant sur / (dossier-de-travail volume:uploads) :
+requis 12884901888 octets (12G, dont marge de 20 %), disponible 10737418240
+octets (10G), manque 2147483648 octets (2.0G)
+```
+
+Ce refus survient avant toute écriture : le conteneur applicatif retrouve son
+état initial. La croissance de la base MySQL pendant l'import n'est pas
+comptée : elle se fait dans le volume de données MySQL, hors de ce contrôle.
 
 | Règle | Comportement |
 |---|---|
@@ -284,6 +322,10 @@ en root, puis `rsync -aH --numeric-ids` en root. `restore.sh` le vérifie :
 | `--mirror` | Nombre de fichiers à supprimer annoncé, seconde phrase à taper (`SUPPRIMER <n>`) ; refus si ce nombre change avant l'écriture |
 | Volumes de l'instantané à un autre UID que `<ENV>_APP_OWNER` | Refus, avant toute écriture |
 | Propriétaire ou droits restaurés différents de l'instantané | Échec en fin de restauration, fichiers en cause listés |
+| Espace libre inférieur au besoin estimé, marge comprise | Refus avant toute écriture, avec requis, disponible et manque |
+| rsync sans prise en charge de `-A`/`-X` | Refus avant toute écriture |
+| Système de fichiers cible refusant une ACL ou un attribut étendu | Échec explicite pendant le rsync, conteneur laissé arrêté |
+| Échec après `écriture entamée` | Conteneur applicatif laissé **arrêté**, commandes pour terminer ou annuler |
 
 ### Choisir le mode de restauration des fichiers
 
@@ -428,10 +470,10 @@ vider par `rsync --delete`. Rien de cela n'est codé.
 
 ## Limites connues
 
-- **ACL et attributs étendus non restaurés.** rsync tourne en `-a`, sans `-A`
-  ni `-X` : propriétaire, groupe et droits Unix sont restaurés et vérifiés,
-  pas les ACL. Hypothèse H11 : les volumes n'en portent pas (l'application
-  n'en pose pas, et rien dans les compose ne le suggère).
+- **ACL et attributs étendus restaurés, non comparés.** rsync les restaure
+  (`-A -X`) et s'arrête si le système de fichiers les refuse, mais la
+  vérification de fin de restauration ne compare que propriétaire, groupe et
+  droits Unix.
 - **Vérification de propriété limitée à ce que l'instantané enregistre.** Si
   les fichiers archivés appartenaient déjà au mauvais UID, `restore.sh` le
   reproduit fidèlement ; seul le contrôle de la racine contre

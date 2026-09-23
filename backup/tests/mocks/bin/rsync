@@ -1,19 +1,41 @@
 #!/usr/bin/env bash
 # Enveloppe de rsync pour tests/run.sh : consigne ses arguments dans
-# $TEST_ROOT/log/rsync, simule un échec si MOCK_RSYNC_EXIT est posé, et sinon
-# délègue au VRAI rsync (le premier du PATH hors des simulacres). Les modes
-# --merge et --mirror sont donc éprouvés sur un rsync réel.
+# $TEST_ROOT/log/rsync, et délègue au VRAI rsync. Les modes --merge et
+# --mirror sont donc éprouvés sur un rsync réel.
+#
+# Le rsync réel retenu est le premier, dans le PATH puis dans les emplacements
+# Homebrew, qui annonce « ACLs » et « xattrs » dans ses capacités : restore.sh
+# exige -A et -X. L'openrsync de macOS ne les connaît pas ; sur Mac,
+# `brew install rsync`. Sur le VPS, le rsync d'Ubuntu convient.
+#
+# Simulations, par variable d'environnement :
+#   MOCK_RSYNC_EXIT=N         échec générique, code N
+#   MOCK_RSYNC_NO_ACL=1       rsync compilé sans ACL : refuse -A d'emblée
+#   MOCK_RSYNC_ACL_FS=1       système de fichiers cible sans ACL : message
+#                             « Operation not supported » de rsync, code 23
 set -euo pipefail
 : "${TEST_ROOT:?variable posée par tests/run.sh}" "${TEST_MOCKS:?variable posée par tests/run.sh}"
 printf '%s\n' "$*" >>"$TEST_ROOT/log/rsync"
+if [[ -n ${MOCK_RSYNC_NO_ACL:-} ]]; then
+  echo "rsync: This rsync does not support --acls" >&2
+  exit 1
+fi
+if [[ -n ${MOCK_RSYNC_ACL_FS:-} ]]; then
+  echo "rsync: [receiver] set_acl: sys_acl_set_file(b.png, ACL_TYPE_ACCESS): Operation not supported (95)" >&2
+  echo "rsync error: some files/attrs were not transferred (see previous errors) (code 23)" >&2
+  exit 23
+fi
 if [[ -n ${MOCK_RSYNC_EXIT:-} ]]; then
   echo "rsync: erreur simulée" >&2
   exit "$MOCK_RSYNC_EXIT"
 fi
-IFS=: read -r -a dirs <<<"$PATH"
+IFS=: read -r -a dirs <<<"$PATH:/opt/homebrew/bin:/usr/local/bin"
 for d in "${dirs[@]}"; do
-  [[ $d == "$TEST_MOCKS/bin" ]] && continue
-  if [[ -x $d/rsync ]]; then exec "$d/rsync" "$@"; fi
+  [[ $d == "$TEST_MOCKS/bin" || ! -x $d/rsync ]] && continue
+  caps=$("$d/rsync" --version 2>/dev/null || true)
+  if [[ $caps == *ACLs* && $caps == *xattrs* && $caps != *"no ACLs"* && $caps != *"no xattrs"* ]]; then
+    exec "$d/rsync" "$@"
+  fi
 done
-echo "rsync introuvable hors des simulacres" >&2
+echo "aucun rsync avec ACL et xattrs hors des simulacres (macOS : brew install rsync)" >&2
 exit 127

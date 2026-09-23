@@ -20,7 +20,11 @@
 #      restauré, sans valeur par défaut : --merge ou --mirror. En --mirror, le
 #      nombre de fichiers qui seront supprimés est annoncé et doit être
 #      confirmé par une seconde phrase tapée.
-#   8. Propriété et droits : le propriétaire des volumes dans l'instantané doit
+#   8. Espace disque : estimé depuis l'instantané, avec une marge
+#      (RESTORE_SPACE_MARGIN_PERCENT), sur le système de fichiers du dossier de
+#      travail et sur celui des volumes ; vérifié avant l'extraction, puis de
+#      nouveau pour les volumes juste avant d'écrire.
+#   9. Propriété et droits : le propriétaire des volumes dans l'instantané doit
 #      être celui sous lequel l'application écrit (<ENV>_APP_OWNER), vérifié
 #      AVANT l'écriture ; après l'écriture, propriétaire et droits de chaque
 #      fichier restauré sont comparés à ceux de l'instantané.
@@ -28,7 +32,8 @@
 # CE QUI EST ÉCRASÉ
 #   db      la base est SUPPRIMÉE puis recréée depuis le dump (DROP DATABASE).
 #   <rôle>  chaque volume (uploads, cv_private...) est synchronisé par rsync,
-#           UID/GID numériques et droits préservés (-a --numeric-ids, en root) :
+#           UID/GID numériques, droits, ACL et attributs étendus préservés
+#           (-aHAX --numeric-ids, en root) :
 #           --merge   les fichiers absents de l'instantané sont CONSERVÉS ;
 #           --mirror  ils sont SUPPRIMÉS (état exact de l'instantané).
 #
@@ -36,11 +41,22 @@
 #   Aucune écriture n'a lieu pendant qu'il tourne : un téléversement concurrent
 #   serait écrasé, ou produirait un état mêlant deux moments. S'il tourne,
 #   restore.sh refuse, sauf --stop-app : il est alors arrêté juste avant
-#   l'écriture et REDÉMARRÉ ensuite, y compris en cas d'échec (trap EXIT), pour
-#   revenir à l'état initial. Arrêté au départ, il reste arrêté. Le redémarrage
-#   passe par `docker start`, jamais `docker compose up`, qui réinterpolerait
-#   les labels (piège STAGING_BASICAUTH, README racine). Le conteneur MySQL,
-#   lui, n'est jamais arrêté : la base est restaurée par import, à travers lui.
+#   l'écriture, puis redémarré à la fin. Arrêté au départ, il reste arrêté dans
+#   tous les cas. Le redémarrage passe par `docker start`, jamais `docker
+#   compose up`, qui réinterpolerait les labels (piège STAGING_BASICAUTH,
+#   README racine). Le conteneur MySQL, lui, n'est jamais arrêté : la base est
+#   restaurée par import, à travers lui.
+#
+# EN CAS D'ÉCHEC : LE POINT DE BASCULE EST WRITE_STARTED
+#   L'indicateur WRITE_STARTED est posé par begin_write, JUSTE AVANT la
+#   première opération destructive de chaque cible (import de la base, rsync
+#   d'un volume). Il n'est jamais déduit d'un code de sortie.
+#   - Échec avant (validation, volume, espace disque, propriété, mode,
+#     confirmation) : rien n'est écrit, le trap rend au conteneur applicatif
+#     son état initial ; arrêté par --stop-app, il est redémarré.
+#   - Échec après : la cible est dans un état intermédiaire, le conteneur
+#     applicatif reste ARRÊTÉ, pour ne servir ni écrire aucune donnée
+#     incohérente. Le journal donne la commande de retour arrière.
 #
 # UTILISATION (sur le VPS, en root, dans un terminal)
 #   restore.sh --list [--target ENV]
@@ -49,7 +65,7 @@
 #              [--no-safety-snapshot]
 #
 # CODES DE SORTIE
-#   0  restauration terminée, conteneur applicatif revenu à son état initial
+#   0  restauration terminée, conteneur applicatif dans son état initial
 #   1  échec ou refus ; le journal dit si la cible a été modifiée ou non
 #   3  refus de sécurité (environnements incompatibles)
 #
@@ -77,6 +93,9 @@ PHASE='prepare' # prepare -> safety -> prepare -> write -> done
 APP_CONTAINER=''
 APP_OWNER=''
 APP_STOPPED_BY_US=0
+WRITE_STARTED=0 # posé par begin_write, juste avant la 1re opération destructive
+DUMP_SIZE=0
+FS_AVAIL=0 FS_MOUNT=''
 SAFETY_ID=''
 DEL_TOTAL=0
 
@@ -84,7 +103,7 @@ SNAP_ID='' SNAP_SHORT='' SNAP_TIME='' SNAP_HOST='' SNAP_ENV=''
 SNAP_PATHS=()
 M_FORMAT='' M_ENV='' M_DB_NAME='' M_DB_FILE=''
 M_ROLES=()
-declare -A M_VOL=() M_MP=() T_VOL=() T_MP=() DEL_FILES=() DEL_DIRS=()
+declare -A M_VOL=() M_MP=() T_VOL=() T_MP=() DEL_FILES=() DEL_DIRS=() DATA_SIZE=()
 T_DB_NAME='' T_DB_CONTAINER=''
 COMPONENTS=()
 
@@ -105,7 +124,9 @@ Mode de restauration des fichiers, OBLIGATOIRE dès qu'un volume est restauré :
 
 Conteneur applicatif :
   --stop-app                      l'arrête juste avant l'écriture et le
-                                  redémarre ensuite, même en cas d'échec. Sans
+                                  redémarre à la fin, ou après un échec
+                                  survenu AVANT toute écriture. Après un échec
+                                  en cours d'écriture, il reste arrêté. Sans
                                   cette option, restore.sh refuse de s'exécuter
                                   s'il tourne.
 
@@ -131,9 +152,12 @@ EOF
 on_exit() {
   local rc=$?
   local d
-  # En premier : revenir à l'état initial du conteneur applicatif, quoi qu'il
-  # soit arrivé. Seul un conteneur arrêté PAR restore.sh est redémarré.
-  restart_app || true
+  # En premier : le conteneur applicatif. Aucune écriture entamée : il
+  # retrouve son état initial (seul un conteneur arrêté PAR restore.sh est
+  # redémarré). Écriture entamée : il reste arrêté, voir plus bas.
+  if ((!WRITE_STARTED)); then
+    restart_app || true
+  fi
   for d in "${CLEANUP_DIRS[@]}"; do
     rm -rf -- "$d"
   done
@@ -145,7 +169,7 @@ on_exit() {
   if ((rc != 0)); then
     case $PHASE in
       prepare)
-        error "restauration abandonnée AVANT toute écriture : la cible '$TARGET' n'a pas été modifiée."
+        error "restauration abandonnée AVANT toute écriture : la cible '$TARGET' n'a pas été modifiée ; le conteneur applicatif est dans son état initial."
         ;;
       safety)
         error "instantané de sécurité impossible : la cible '$TARGET' n'a pas été modifiée."
@@ -153,10 +177,12 @@ on_exit() {
         ;;
       write)
         error "restauration interrompue PENDANT l'écriture : '$TARGET' est dans un état intermédiaire."
-        error "le conteneur applicatif a été remis dans son état initial ; ne pas considérer ses données comme cohérentes."
+        error "le conteneur $APP_CONTAINER est laissé ARRÊTÉ à dessein : il servirait des pages cassées et pourrait écrire dans une base ou des volumes à moitié restaurés. NE PAS le démarrer avant d'avoir terminé ou annulé la restauration."
+        error "terminer : corriger la cause, puis relancer la même commande restore.sh (la restauration est complète et rejouable)."
         if [[ -n $SAFETY_ID ]]; then
-          error "retour à l'état précédent : restore.sh --target $TARGET --snapshot $SAFETY_ID --no-safety-snapshot"
+          error "ou annuler, retour à l'état précédent : restore.sh --target $TARGET --snapshot $SAFETY_ID --no-safety-snapshot --mirror"
         fi
+        error "ensuite seulement : docker start $APP_CONTAINER"
         ;;
       *) ;;
     esac
@@ -355,7 +381,7 @@ check_volume_mode() {
 check_app_state() {
   if container_running "$APP_CONTAINER"; then
     ((STOP_APP)) ||
-      die "le conteneur applicatif $APP_CONTAINER tourne. Écrire pendant qu'il fonctionne produirait un état mêlant deux moments, et pourrait écraser un téléversement en cours. Au choix : l'arrêter soi-même (docker stop $APP_CONTAINER), ou relancer avec --stop-app, qui l'arrête juste avant l'écriture et le redémarre ensuite, même en cas d'échec. Le conteneur MySQL $T_DB_CONTAINER, lui, doit rester démarré."
+      die "le conteneur applicatif $APP_CONTAINER tourne. Écrire pendant qu'il fonctionne produirait un état mêlant deux moments, et pourrait écraser un téléversement en cours. Au choix : l'arrêter soi-même (docker stop $APP_CONTAINER), ou relancer avec --stop-app, qui l'arrête juste avant l'écriture et le redémarre à la fin (ou après un échec survenu avant toute écriture). Le conteneur MySQL $T_DB_CONTAINER, lui, doit rester démarré."
     info "$APP_CONTAINER tourne : il sera arrêté juste avant l'écriture, puis redémarré (--stop-app)"
   else
     info "$APP_CONTAINER est arrêté : il le restera après la restauration"
@@ -372,8 +398,8 @@ stop_app_for_write() {
   APP_STOPPED_BY_US=1
 }
 
-# Ne redémarre QUE ce que restore.sh a arrêté. Appelé en fin de restauration et
-# par on_exit, donc aussi après un échec.
+# Ne redémarre QUE ce que restore.sh a arrêté. Appelé en fin de restauration, et
+# par on_exit tant qu'aucune écriture n'a été entamée.
 restart_app() {
   ((APP_STOPPED_BY_US)) || return 0
   info "redémarrage de $APP_CONTAINER (retour à l'état initial)"
@@ -385,6 +411,15 @@ restart_app() {
   return 1
 }
 
+# begin_write DESCRIPTION — point de bascule, à appeler JUSTE AVANT chaque
+# opération destructive (import de la base, rsync d'un volume). À partir de
+# là, un échec laisse le conteneur applicatif arrêté (voir on_exit).
+begin_write() {
+  WRITE_STARTED=1
+  PHASE='write'
+  info "écriture entamée : $1"
+}
+
 # ── Contenu et métadonnées des volumes dans l'instantané ─────────────────────
 #
 # Pour chaque volume restauré, WORK_DIR/listing.<rôle> contient une ligne par
@@ -393,18 +428,35 @@ restart_app() {
 # par restic au moment de la sauvegarde : c'est la référence de propriété et
 # de droits.
 
+# Filtre jq commun : les entrées de l'instantané sous le point de montage $mp.
+# shellcheck disable=SC2016  # $mp est une variable jq (--arg), pas bash
+readonly JQ_UNDER_MP='select((.struct_type // .message_type) == "node")
+  | select(.path == $mp or (.path | startswith($mp + "/")))'
+
+# Pour chaque volume : le listing, et DATA_SIZE[rôle], somme des tailles des
+# fichiers du volume dans l'instantané (octets), base du contrôle d'espace.
 load_listings() {
-  local c
+  local c json
   for c in "${COMPONENTS[@]}"; do
     [[ $c == db ]] && continue
-    rstc ls --json "$SNAP_ID" "${M_MP[$c]}" | jq -r --arg mp "${M_MP[$c]}" '
-      select((.struct_type // .message_type) == "node")
-      | select(.path == $mp or (.path | startswith($mp + "/")))
+    json=$WORK_DIR/ls.$c.json
+    rstc ls --json "$SNAP_ID" "${M_MP[$c]}" >"$json"
+    jq -r --arg mp "${M_MP[$c]}" "$JQ_UNDER_MP"'
       | "\(.uid) \(.gid) \(.mode) \(if .path == $mp then "." else .path[($mp | length) + 1:] end)"' \
-      >"$WORK_DIR/listing.$c"
+      "$json" >"$WORK_DIR/listing.$c"
     [[ -s $WORK_DIR/listing.$c ]] || die "volume '$c' vide ou illisible dans l'instantané $SNAP_SHORT"
+    DATA_SIZE[$c]=$(jq -s --arg mp "${M_MP[$c]}" \
+      "[.[] | $JQ_UNDER_MP | select(.type == \"file\") | (.size // 0)] | add // 0" "$json")
   done
   return 0
+}
+
+# DUMP_SIZE : taille du dump SQL dans l'instantané (octets).
+load_dump_size() {
+  local path=$ALIVAON_DUMP_ROOT/$SNAP_ENV/$M_DB_FILE
+  DUMP_SIZE=$(rstc ls --json "$SNAP_ID" "$path" |
+    jq -s --arg p "$path" '[.[] | select((.struct_type // .message_type) == "node")
+      | select(.path == $p and .type == "file") | (.size // 0)] | add // 0')
 }
 
 # perm_of MODE_RESTIC — droits Unix (octal, sans zéro initial, comme stat %a)
@@ -491,21 +543,51 @@ confirm_deletions() {
 
 # ── Synchronisation et vérification d'un volume ──────────────────────────────
 
+# Options rsync de restauration, en un seul endroit.
+# -a : -rlptgoD, dont -o -g (propriétaire, groupe) et -p (droits) ;
+# -H : liens physiques ; -A : ACL ; -X : attributs étendus, que restic capture
+# et qu'un rsync sans ces options perdrait en silence ;
+# --numeric-ids : UID/GID transmis tels quels, jamais traduits par nom (82 n'a
+# pas de nom sur l'hôte). Exécuté en root, seul à pouvoir tout attribuer.
+readonly RSYNC_OPTS=(-aHAX --numeric-ids)
+
+# AVANT l'écriture : ce rsync sait-il traiter -A et -X ? Un rsync compilé sans
+# ACL ni xattrs refuse l'option d'emblée : on le découvre ici, pas à mi-chemin.
+check_rsync_capabilities() {
+  local probe=$WORK_DIR/rsync-probe rc=0
+  mkdir -p -- "$probe/src" "$probe/dst"
+  rsync "${RSYNC_OPTS[@]}" --dry-run -- "$probe/src/" "$probe/dst/" 2>"$probe/err" || rc=$?
+  if ((rc != 0)); then
+    error "rsync : $(tr '\n' ' ' <"$probe/err")"
+    die "le rsync de ce serveur ne prend pas en charge les ACL ou les attributs étendus (-A, -X) : les restaurer est impossible, et les perdre en silence est exclu. Aucune donnée n'a été modifiée."
+  fi
+  rm -rf -- "$probe"
+}
+
 sync_volume() {
-  local c=$1 rc=0
-  # -a : -rlptgoD, dont -o -g (propriétaire, groupe) et -p (droits) ;
-  # --numeric-ids : UID/GID transmis tels quels, jamais traduits par nom (82
-  # n'a pas de nom sur l'hôte) ; -H : liens physiques. Exécuté en root, seul
-  # à pouvoir attribuer un propriétaire quelconque.
-  local -a opts=(-aH --numeric-ids)
+  local c=$1 rc=0 err line
+  local -a opts=("${RSYNC_OPTS[@]}")
   if [[ $VOLUME_MODE == mirror ]]; then
     opts+=(--delete)
   fi
+  err=$WORK_DIR/rsync.$c.err
   info "synchronisation $c -> ${T_MP[$c]} (--$VOLUME_MODE)"
+  begin_write "rsync du volume $c vers ${T_MP[$c]}"
   # Échec traité explicitement, sans compter sur set -e : la fonction reste
   # sûre quel que soit son contexte d'appel.
-  rsync "${opts[@]}" -- "$WORK_DIR/files${M_MP[$c]}/" "${T_MP[$c]}/" || rc=$?
-  ((rc == 0)) || die "rsync a échoué (code $rc) sur ${T_MP[$c]} : volume dans un état intermédiaire"
+  rsync "${opts[@]}" -- "$WORK_DIR/files${M_MP[$c]}/" "${T_MP[$c]}/" 2>"$err" || rc=$?
+  while IFS= read -r line; do
+    warn "rsync : $line"
+  done <"$err"
+  ((rc == 0)) && return 0
+  # Le système de fichiers cible refuse une ACL ou un attribut étendu présent
+  # dans l'instantané : rsync signale « Operation not supported » sur
+  # set_acl / lsetxattr. Diagnostic explicite plutôt qu'un code nu.
+  if grep -Eiq 'acl|xattr|extended attribute' "$err" &&
+    grep -Eiq 'not supported|does not support' "$err"; then
+    die "le système de fichiers de ${T_MP[$c]} ne prend pas en charge les ACL ou attributs étendus présents dans l'instantané (rsync, code $rc) : restauration arrêtée plutôt que de les perdre en silence. Volume dans un état intermédiaire ; voir RUNBOOK-BACKUP.md, étape 2 (getfacl, getfattr)."
+  fi
+  die "rsync a échoué (code $rc) sur ${T_MP[$c]} : volume dans un état intermédiaire"
 }
 
 # APRÈS l'écriture : chaque entrée de l'instantané doit exister sur la cible
@@ -543,14 +625,60 @@ verify_volume() {
   info "volume '$c' : propriétaire, groupe et droits conformes à l'instantané ($(wc -l <"$WORK_DIR/listing.$c" | tr -d ' ') entrées)"
 }
 
+# ── Espace disque ────────────────────────────────────────────────────────────
+
+# fs_measure CHEMIN — FS_AVAIL (octets libres) et FS_MOUNT (point de montage)
+# du système de fichiers qui porte CHEMIN. Variables globales, pas de
+# sous-shell : `die` doit interrompre le script.
+fs_measure() {
+  local line kb
+  line=$(df -Pk -- "$1" | tail -n 1)
+  IFS=' ' read -r _ _ _ kb _ FS_MOUNT <<<"$line"
+  [[ $kb =~ ^[0-9]+$ && -n $FS_MOUNT ]] || die "espace libre illisible pour $1 (df : $line)"
+  FS_AVAIL=$((kb * 1024))
+}
+
+human() { numfmt --to=iec --suffix=o "$1"; }
+
+# check_space full|write
+#   full   avant l'extraction : le dossier de travail reçoit le dump et les
+#          fichiers des volumes (restic restore), puis chaque volume reçoit ses
+#          fichiers (rsync). Deux besoins distincts ; sur un même système de
+#          fichiers, ils s'additionnent : environ deux fois les données.
+#   write  juste avant d'écrire, application arrêtée, extraction faite : seul
+#          reste le besoin des volumes.
+# Chaque besoin est majoré de RESTORE_SPACE_MARGIN_PERCENT. Refus chiffré au
+# premier système de fichiers insuffisant.
 check_space() {
-  local need avail
-  has_volumes || return 0
-  need=$(rstc stats --json --mode restore-size "$SNAP_ID" | jq -r '.total_size')
-  avail=$(df --output=avail -B1 -- "$ALIVAON_STATE_DIR" | tail -n 1 | tr -d ' ')
-  info "espace requis (majorant) : $(numfmt --to=iec --suffix=o "$need") — disponible : $(numfmt --to=iec --suffix=o "$avail")"
-  ((avail > need + need / 10)) ||
-    die "espace disque insuffisant dans $ALIVAON_STATE_DIR pour extraire l'instantané"
+  local mode=$1 c need fs req avail
+  local -A fs_need=() fs_what=() fs_avail=()
+  if [[ $mode == full ]]; then
+    need=$DUMP_SIZE
+    for c in "${COMPONENTS[@]}"; do
+      [[ $c == db ]] || need=$((need + DATA_SIZE[$c]))
+    done
+    fs_measure "$WORK_DIR"
+    fs_need[$FS_MOUNT]=$((${fs_need[$FS_MOUNT]:-0} + need))
+    fs_what[$FS_MOUNT]+="dossier-de-travail "
+    fs_avail[$FS_MOUNT]=$FS_AVAIL
+  fi
+  for c in "${COMPONENTS[@]}"; do
+    [[ $c == db ]] && continue
+    fs_measure "${T_MP[$c]}"
+    fs_need[$FS_MOUNT]=$((${fs_need[$FS_MOUNT]:-0} + DATA_SIZE[$c]))
+    fs_what[$FS_MOUNT]+="volume:$c "
+    fs_avail[$FS_MOUNT]=$FS_AVAIL
+  done
+  for fs in "${!fs_need[@]}"; do
+    need=${fs_need[$fs]}
+    req=$(((need * (100 + RESTORE_SPACE_MARGIN_PERCENT) + 99) / 100))
+    avail=${fs_avail[$fs]}
+    if ((avail < req)); then
+      die "espace disque insuffisant sur $fs (${fs_what[$fs]% }) : requis $req octets ($(human "$req"), dont marge de $RESTORE_SPACE_MARGIN_PERCENT %), disponible $avail octets ($(human "$avail")), manque $((req - avail)) octets ($(human $((req - avail))))"
+    fi
+    info "espace disque sur $fs (${fs_what[$fs]% }) : requis $(human "$req") marge comprise, disponible $(human "$avail")"
+  done
+  return 0
 }
 
 # ── Confirmation ─────────────────────────────────────────────────────────────
@@ -638,7 +766,7 @@ extract() {
 }
 
 write_target() {
-  local c confirmed=$DEL_TOTAL
+  local c confirmed=$DEL_TOTAL rc=0
   stop_app_for_write
 
   # Le décompte confirmé est celui qui sera supprimé. Recalculé une fois
@@ -649,12 +777,17 @@ write_target() {
     ((DEL_TOTAL == confirmed)) ||
       die "le nombre de fichiers à supprimer est passé de $confirmed à $DEL_TOTAL depuis la confirmation : refus, aucune donnée n'a été modifiée"
   fi
+  # Dernier contrôle d'espace, application arrêtée et extraction faite : son
+  # échec est encore « avant écriture », l'application est donc redémarrée.
+  check_space write
 
-  PHASE='write'
   for c in "${COMPONENTS[@]}"; do
     if [[ $c == db ]]; then
       info "import du dump dans $T_DB_CONTAINER (DROP puis CREATE DATABASE $T_DB_NAME)"
-      db_run "$TARGET" restore "$DB_IMPORT_SCRIPT" <"$WORK_DIR/db.sql"
+      begin_write "import de la base $T_DB_NAME dans $T_DB_CONTAINER"
+      # Échec explicite, sans compter sur set -e (voir sync_volume).
+      db_run "$TARGET" restore "$DB_IMPORT_SCRIPT" <"$WORK_DIR/db.sql" || rc=$?
+      ((rc == 0)) || die "import de la base $T_DB_NAME a échoué (code $rc) : base dans un état intermédiaire"
     else
       sync_volume "$c"
       verify_volume "$c"
@@ -702,11 +835,17 @@ main() {
   check_volume_mode
   check_app_state
   load_listings
+  if [[ " $(join_by ' ' "${COMPONENTS[@]}") " == *' db '* ]]; then
+    load_dump_size
+  fi
   check_snapshot_owner
   if has_volumes && [[ $VOLUME_MODE == mirror ]]; then
     count_deletions
   fi
-  check_space
+  check_space full
+  if has_volumes; then
+    check_rsync_capabilities
+  fi
   require_tty
   confirm
   if has_volumes && [[ $VOLUME_MODE == mirror ]]; then

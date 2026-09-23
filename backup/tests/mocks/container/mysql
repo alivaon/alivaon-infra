@@ -5,3 +5,8 @@ set -euo pipefail
 cnf=${1#--defaults-extra-file=}
 { echo "ARGS: $*"; echo "CNF_PATH: $cnf"; cat "$cnf"; } >"$TEST_ROOT/log/mysql"
 cat >"$TEST_ROOT/log/mysql.stdin"
+# Échec simulé à la demande (import interrompu).
+if [[ -n ${MOCK_MYSQL_EXIT:-} ]]; then
+  echo "ERROR 1064 (42000) at line 42: erreur simulée" >&2
+  exit "$MOCK_MYSQL_EXIT"
+fi

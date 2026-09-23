@@ -39,15 +39,42 @@ moments. S'il tourne, `restore.sh` **refuse** et dit quoi arrêter. Deux
 façons de procéder :
 
 - l'arrêter soi-même (`docker stop <conteneur>`) : `restore.sh` le laisse
-  arrêté à la fin, le redémarrer à la main ;
+  arrêté dans tous les cas, le redémarrer à la main ;
 - passer **`--stop-app`** : `restore.sh` l'arrête juste avant l'écriture et
-  le **redémarre** ensuite, **y compris en cas d'échec** (trap) ; l'état
-  initial est toujours rétabli.
+  le redémarre à la fin (voir ci-dessous en cas d'échec).
 
 Le conteneur MySQL, lui, n'est jamais arrêté : la base est restaurée par
 import, à travers lui. La règle vaut pour toute écriture, base comprise : une
 application qui tourne pendant l'import écrirait dans une base à moitié
 recréée.
+
+**En cas d'échec, tout dépend d'un seul point : l'écriture a-t-elle
+commencé ?** `restore.sh` pose un indicateur (`WRITE_STARTED`) juste avant la
+première opération destructive : l'import de la base, ou le rsync d'un
+volume. Le journal l'annonce par une ligne `écriture entamée : ...`.
+
+| Moment de l'échec | Exemples | État de la cible | Conteneur applicatif |
+|---|---|---|---|
+| **Avant** `écriture entamée` | validation, volume introuvable, espace disque, propriété, mode, confirmation incorrecte | intacte | **état initial** : arrêté par `--stop-app`, il est redémarré ; arrêté au départ, il reste arrêté |
+| **Après** `écriture entamée` | import interrompu, rsync en erreur, écart de propriété après écriture | **intermédiaire** | **laissé ARRÊTÉ**, à dessein : démarré, il servirait des pages cassées et pourrait écrire dans une base ou des volumes à moitié restaurés |
+
+**Que faire dans le second cas.** Le journal se termine par
+`restauration interrompue PENDANT l'écriture`, suivi de la conduite à tenir :
+
+1. **Ne pas** démarrer le conteneur applicatif.
+2. Lire la cause dans le journal (espace, ACL, import, propriété...) et la
+   corriger.
+3. **Soit terminer** : relancer **la même** commande `restore.sh`. La
+   restauration est complète et rejouable ; `--stop-app` n'est plus utile,
+   le conteneur étant déjà arrêté.
+4. **Soit annuler** : revenir à l'état d'avant la restauration avec
+   l'instantané de sécurité dont le journal donne l'identifiant :
+   `restore.sh --target <cible> --snapshot <ID_SÉCURITÉ> --no-safety-snapshot --mirror`.
+   Sans instantané de sécurité (`--no-safety-snapshot`), seule la première
+   voie existe.
+5. Une fois la restauration menée à son terme sans erreur, et seulement
+   alors : `docker start <conteneur applicatif>`, puis les contrôles du
+   test 1 (1.8 et 1.9).
 
 **Le mode de restauration des fichiers est obligatoire** dès qu'un volume est
 restauré, sans valeur par défaut :
@@ -354,10 +381,11 @@ rm ~/.alivaon-staging.netrc
 - `restore.sh` s'est arrêté **avant** l'écriture (`abandonnée AVANT toute
   écriture`) : la cause est dans le journal affiché. Le staging est resté dans
   son état saboté : corriger, puis relancer 1.7.
-- `restore.sh` s'est arrêté **pendant** l'écriture : `staging-app-1` a été
-  redémarré par le trap (retour à l'état initial), mais le staging est dans
-  un état intermédiaire. Corriger, relancer 1.7 : la restauration est
-  complète et rejouable.
+- `restore.sh` s'est arrêté **pendant** l'écriture (`restauration
+  interrompue PENDANT l'écriture`) : `staging-app-1` est laissé **arrêté**, le
+  staging est dans un état intermédiaire. Appliquer « Que faire dans le second
+  cas » (début de ce runbook) : corriger, relancer 1.7, puis
+  `docker start staging-app-1` avant 1.8.
 - Écart de propriété ou de droits signalé en fin de restauration, ou C8 en
   échec : comparer avec la référence de l'étape 2 de RUNBOOK-BACKUP (UID/GID
   des processus PHP-FPM et des volumes). Ne pas corriger par un `chown` à la

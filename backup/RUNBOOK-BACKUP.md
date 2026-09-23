@@ -70,7 +70,6 @@ contrôlés à l'**étape 2**, avant toute écriture sur le serveur.
 | H8 | Tables toutes InnoDB, aucune routine stockée ni événement | Application Doctrine standard | Déduit. `--single-transaction` n'est cohérent **que** pour InnoDB |
 | H9 | **Pilote `local` requis** pour chaque volume sauvegardé : seul ce pilote garantit que le point de montage donné par Docker est un dossier de l'hôte, lisible par restic et inscriptible par rsync | Aucun `driver:` dans les compose, donc pilote par défaut | Déduit. **Vérifié à chaque exécution** : les scripts refusent un volume absent ou d'un autre pilote (`resolve_volume`, `lib.sh`). Contrôlé aussi par la 3ᵉ commande de l'étape 2 |
 | H10 | PHP-FPM écrit dans les volumes sous l'UID:GID **82:82** (`www-data` de l'image), et la racine de chaque volume, `uploads` comme `cv_private`, lui appartient | README racine, « Connexion à File Browser » (uid 82, propriétaire réel des fichiers téléversés) ; `PUID`/`PGID` de `filebrowser/docker-compose.yml` | Confirmé pour `uploads` par le déploiement de File Browser, **déduit** pour `cv_private`. Constaté à la fin de l'étape 2 ; `restore.sh` le vérifie à chaque restauration (`<ENV>_APP_OWNER`) |
-| H11 | Les volumes ne portent ni ACL ni attributs étendus utiles à l'application | Aucune mention dans les compose ni dans l'application ; rsync restaure en `-a`, sans `-A` ni `-X` | Déduit, non contrôlé par ce runbook. Vérification possible sur l'hôte, si le paquet `acl` est installé : `sudo getfacl -R -s <point de montage>` ne doit rien afficher |
 
 **Les CV sont sauvegardés.** Le volume `cv_private` contient des fichiers
 téléversés par les candidats, absents de la base : sans sauvegarde, une perte
@@ -189,8 +188,9 @@ continuer** tant que le test 0 n'a pas réussi.
 
 ## Étape 2 — Contrôler les hypothèses [VPS]
 
-Rien n'est modifié à cette étape. Si un résultat diffère de l'attendu, corriger
-la valeur correspondante à l'étape 7, pas le code.
+Rien n'est modifié à cette étape, hormis l'installation de deux outils de
+lecture (`acl`, `attr`). Si un résultat diffère de l'attendu, corriger la
+valeur correspondante à l'étape 7, pas le code.
 
 ```bash
 docker ps --format '{{.Names}}' | sort
@@ -322,6 +322,43 @@ docker exec staging-app-1 find /var/www/html/public/uploads /var/www/html/var/pr
 
 **Effet / Vérifier** : identiques, pour le staging. Même image, donc mêmes
 valeurs attendues.
+
+### ACL et attributs étendus des volumes
+
+Ce n'est plus une hypothèse : `restore.sh` restaure ACL et attributs étendus
+(`rsync -A -X`), vérifie avant d'écrire que le rsync du serveur les prend en
+charge, et s'arrête avec un message explicite si le système de fichiers cible
+les refuse. Les commandes suivantes établissent le **fait** de départ : y en
+a-t-il, et lesquels ?
+
+```bash
+sudo apt-get install -y acl attr
+```
+
+**Effet** : installe `getfacl` et `getfattr`, outils de lecture. Idempotent.
+**Vérifier** : `command -v getfacl getfattr` affiche deux chemins.
+
+```bash
+sudo getfacl -R -s -p $(docker volume inspect -f '{{.Mountpoint}}' production_uploads production_cv_private staging_uploads_staging staging_cv_private_staging)
+```
+
+**Effet** : liste, dans les quatre volumes, les fichiers et dossiers qui
+portent une ACL **au-delà** des droits Unix ordinaires (`-s` masque les
+autres).
+**Vérifier et noter** : aucune sortie, attendu, signifie qu'aucune ACL n'est
+posée. Des lignes : les noter ; elles seront restaurées telles quelles.
+
+```bash
+sudo getfattr -R -d -m - $(docker volume inspect -f '{{.Mountpoint}}' production_uploads production_cv_private staging_uploads_staging staging_cv_private_staging)
+```
+
+**Effet** : liste les attributs étendus de tous les espaces de noms (`-m -`)
+sur les quatre volumes.
+**Vérifier et noter** : aucune sortie, attendu, signifie aucun attribut
+étendu. Des lignes : les noter, avec leur espace de noms (`user.`,
+`security.`...) ; elles seront restaurées telles quelles, à condition que le
+système de fichiers du serveur les accepte (sinon `restore.sh` s'arrête et le
+dit).
 
 > **Fenêtre de maintenance commune.** Le correctif du healthcheck MySQL
 > ([docs/runbook-healthcheck-mysql.md](../docs/runbook-healthcheck-mysql.md))

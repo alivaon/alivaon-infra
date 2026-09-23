@@ -25,6 +25,9 @@
 #   H. conteneur applicatif pendant la restauration (refus, --stop-app, trap)
 #   I. propriété et droits des fichiers restaurés
 #   J. modes --merge et --mirror, décompte et confirmation des suppressions
+#   K. échec avant ou après le début de l'écriture (indicateur WRITE_STARTED)
+#   L. ACL et attributs étendus (rsync -A -X)
+#   M. contrôle d'espace disque avant restauration
 #
 # CODE DE SORTIE : 0 si tous les cas passent, 1 sinon.
 #
@@ -311,12 +314,14 @@ section_e() (
   v_ok() { base_config; validate_config; }
   v_no_backup_pw() { base_config; unset PRODUCTION_BACKUP_DB_PASSWORD; validate_config; }
   v_bad_owner() { base_config; PRODUCTION_APP_OWNER=www-data; validate_config; }
+  v_bad_margin() { base_config; RESTORE_SPACE_MARGIN_PERCENT=20%; validate_config; }
 
   section "E. validation de la configuration"
   expect_code 0 "configuration complète acceptée" v_ok
   expect_code 1 "PRODUCTION_BACKUP_DB_PASSWORD manquant -> refus" v_no_backup_pw
   check "message désignant la variable manquante" grep -q 'PRODUCTION_BACKUP_DB_PASSWORD' "$TEST_ROOT/log/out"
   expect_code 1 "APP_OWNER non numérique (www-data) -> refus" v_bad_owner
+  expect_code 1 "RESTORE_SPACE_MARGIN_PERCENT non numérique (20%) -> refus" v_bad_margin
 )
 
 # ── F. Mode de connexion MySQL et hôte du compte ─────────────────────────────
@@ -451,10 +456,13 @@ restore_fixture() {
   chmod 644 "$src/articles/a.jpg" "$src/b.png"
   TARGET=staging APP_CONTAINER=staging-app-1 T_DB_CONTAINER=staging-db-1
   APP_OWNER="$(id -u):$(id -g)"
-  COMPONENTS=(uploads) ONLY='' STOP_APP=0 VOLUME_MODE=merge APP_STOPPED_BY_US=0
+  COMPONENTS=(uploads) ONLY='' STOP_APP=0 VOLUME_MODE=merge APP_STOPPED_BY_US=0 WRITE_STARTED=0
+  RESTORE_SPACE_MARGIN_PERCENT=20 DUMP_SIZE=0
+  rm -f -- "$TEST_ROOT/df.conf"
   M_MP=([uploads]=$mp) M_VOL=([uploads]=staging_uploads_staging)
   T_MP=([uploads]=$fx/target) T_VOL=([uploads]=staging_uploads_staging)
   make_listing "$src" >"$WORK_DIR/listing.uploads"
+  DATA_SIZE=([uploads]=16)
   FX_TARGET=$fx/target
 }
 
@@ -507,9 +515,9 @@ section_h() (
   expect_code 1 "--stop-app, échec de rsync -> la restauration s'arrête" rsync_fails
   check "échec de rsync : arrêt immédiat, code rsync cité, aucune vérification tentée" \
     test "$(grep -c 'rsync a échoué (code 23)' "$TEST_ROOT/log/out")/$(grep -c 'écart(s) de propriété' "$TEST_ROOT/log/out")" = "1/0"
-  check "échec de rsync : application redémarrée par le trap" app_running
-  check "échec de rsync : arrêt puis redémarrage consignés" \
-    test "$(tr '\n' ',' <"$TEST_ROOT/log/docker")" = "stop staging-app-1,start staging-app-1,"
+  check "échec de rsync (écriture entamée) : application laissée arrêtée" app_stopped
+  check "échec de rsync (écriture entamée) : arrêt seul consigné, aucun redémarrage" \
+    test "$(tr '\n' ',' <"$TEST_ROOT/log/docker")" = "stop staging-app-1,"
 )
 
 # ── I. Propriété et droits des fichiers restaurés ────────────────────────────
@@ -524,7 +532,7 @@ section_i() (
   restore_fixture
   sync_volume uploads >/dev/null
   check "rsync lancé avec -a (propriétaire, groupe, droits) et --numeric-ids" \
-    grep -q -- '-aH --numeric-ids' "$TEST_ROOT/log/rsync"
+    grep -q -- '-aHAX --numeric-ids' "$TEST_ROOT/log/rsync"
   expect_code 0 "UID/GID et droits identiques à l'instantané -> vérification conforme" verify_volume uploads
 
   restore_fixture
@@ -628,6 +636,209 @@ section_j() (
   check "décompte changé : rien n'a été supprimé" test -f "$FX_TARGET/recent-1.jpg"
 )
 
+# Exécute COMMANDE... sous le trap EXIT de restore.sh, comme dans main, et
+# consigne la valeur de WRITE_STARTED au moment de la sortie.
+flag_then_exit() {
+  local rc=$?
+  echo "$WRITE_STARTED" >"$TEST_ROOT/log/flag"
+  return "$rc"
+}
+under_trap() (
+  trap 'flag_then_exit; on_exit' EXIT
+  "$@"
+)
+flag() { cat "$TEST_ROOT/log/flag"; }
+docker_log() { tr '\n' ',' <"$TEST_ROOT/log/docker"; }
+
+# ── K. Échec avant ou après le début de l'écriture ───────────────────────────
+
+section_k() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  section "K. échec avant ou après le début de l'écriture"
+
+  owner_refused() {
+    stop_app_for_write
+    APP_OWNER=4242:4242
+    check_snapshot_owner
+  }
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  expect_code 1 "échec de validation après arrêt par --stop-app" under_trap owner_refused
+  check "avant écriture : indicateur non posé" test "$(flag)" = 0
+  check "avant écriture : application redémarrée (état initial)" app_running
+  check "avant écriture : arrêt puis redémarrage consignés" test "$(docker_log)" = "stop staging-app-1,start staging-app-1,"
+  check "avant écriture : message « abandonnée AVANT toute écriture »" \
+    grep -q "abandonnée AVANT toute écriture" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  COMPONENTS=(db)
+  T_DB_NAME=alivaon_db
+  STAGING_DB_CONTAINER=staging-db-1 STAGING_DB_USER=alivaon_app STAGING_DB_PASSWORD=x
+  printf 'DROP DATABASE IF EXISTS alivaon_db;\n-- Dump completed\n' >"$WORK_DIR/db.sql"
+  # Fonctions { } et non ( ) : WRITE_STARTED et APP_STOPPED_BY_US doivent être
+  # posés dans le shell qui porte le trap (celui de under_trap).
+  import_fails() {
+    export MOCK_MYSQL_EXIT=1
+    write_target
+  }
+  expect_code 1 "échec de l'import de la base" under_trap import_fails
+  check "import entamé : indicateur posé" test "$(flag)" = 1
+  check "import entamé : application laissée ARRÊTÉE" app_stopped
+  check "import entamé : arrêt seul consigné" test "$(docker_log)" = "stop staging-app-1,"
+  check "import entamé : consigne de ne pas redémarrer et commande de reprise" \
+    grep -q "laissé ARRÊTÉ à dessein.*" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  rsync_fails() {
+    export MOCK_RSYNC_EXIT=23
+    write_target
+  }
+  expect_code 1 "échec de rsync" under_trap rsync_fails
+  check "rsync entamé : indicateur posé" test "$(flag)" = 1
+  check "rsync entamé : application laissée ARRÊTÉE" app_stopped
+
+  restore_fixture
+  app_state false
+  expect_code 1 "arrêtée au départ, échec AVANT écriture" under_trap owner_refused
+  check "arrêtée au départ, échec avant écriture : reste arrêtée, jamais démarrée" \
+    test "$(app_stopped && echo arrêtée)/$(docker_log)" = "arrêtée/"
+
+  restore_fixture
+  app_state false
+  expect_code 1 "arrêtée au départ, échec APRÈS écriture entamée" under_trap rsync_fails
+  check "arrêtée au départ, échec après écriture : reste arrêtée, jamais démarrée" \
+    test "$(app_stopped && echo arrêtée)/$(docker_log)" = "arrêtée/"
+)
+
+# ── L. ACL et attributs étendus ──────────────────────────────────────────────
+
+section_l() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  local src=/var/lib/docker/volumes/staging_uploads_staging/_data got
+  section "L. ACL et attributs étendus (rsync -A -X)"
+
+  restore_fixture
+  check_rsync_capabilities
+  sync_volume uploads >/dev/null
+  check "pré-contrôle : rsync -aHAX --numeric-ids --dry-run" \
+    grep -q -- '^-aHAX --numeric-ids --dry-run' "$TEST_ROOT/log/rsync"
+  check "restauration : rsync -aHAX --numeric-ids" \
+    grep -q -- '^-aHAX --numeric-ids -- ' "$TEST_ROOT/log/rsync"
+
+  restore_fixture
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -w user.alivaon temoin "$WORK_DIR/files$src/b.png"
+    sync_volume uploads >/dev/null
+    got=$(xattr -p user.alivaon "$FX_TARGET/b.png" 2>/dev/null)
+  else
+    setfattr -n user.alivaon -v temoin "$WORK_DIR/files$src/b.png"
+    sync_volume uploads >/dev/null
+    got=$(getfattr --only-values -n user.alivaon "$FX_TARGET/b.png" 2>/dev/null)
+  fi
+  check "attribut étendu de l'instantané présent sur la cible (vrai rsync)" test "$got" = temoin
+
+  restore_fixture
+  no_acl_rsync() (
+    export MOCK_RSYNC_NO_ACL=1
+    check_rsync_capabilities
+  )
+  expect_code 1 "rsync sans support ACL -> refus avant écriture" no_acl_rsync
+  check "message explicite : ACL ou attributs étendus, rien de modifié" \
+    grep -q "ne prend pas en charge les ACL ou les attributs étendus.*Aucune donnée n'a été modifiée" "$TEST_ROOT/log/out"
+
+  restore_fixture
+  acl_fs() (
+    export MOCK_RSYNC_ACL_FS=1
+    sync_volume uploads
+  )
+  expect_code 1 "système de fichiers cible sans ACL -> échec, pas de poursuite silencieuse" acl_fs
+  check "message explicite : système de fichiers, ACL, renvoi à l'étape 2" \
+    grep -q "le système de fichiers de .* ne prend pas en charge les ACL ou attributs étendus.*étape 2" "$TEST_ROOT/log/out"
+  check "message de rsync journalisé, horodaté" \
+    grep -Eq '^[0-9-]{10}T[0-9:]{8}[+-][0-9]{4} \[ALERTE\] rsync : .*Operation not supported' "$TEST_ROOT/log/out"
+)
+
+# ── M. Contrôle d'espace disque ──────────────────────────────────────────────
+
+section_m() (
+  # shellcheck source=/dev/null
+  . "$TEST_ROOT/restore_fn.sh"
+  set +e
+  local mp=/var/lib/docker/volumes/x/_data
+  section "M. contrôle d'espace disque avant restauration"
+
+  # df.conf : deux systèmes de fichiers distincts, ou un seul.
+  two_fs() { printf '%s /mnt/travail %s\n%s /mnt/volumes %s\n' "$WORK_DIR" "$1" "$FX_TARGET" "$2" >"$TEST_ROOT/df.conf"; }
+  one_fs() { printf '%s /mnt/unique %s\n' "$TEST_ROOT/fx" "$1" >"$TEST_ROOT/df.conf"; }
+
+  # 100 Kio à restaurer, marge 20 % : 120 Kio requis par système de fichiers.
+  restore_fixture
+  DATA_SIZE=([uploads]=102400)
+  two_fs 1000000 1000000
+  expect_code 0 "espace suffisant -> passage" check_space full
+  two_fs 1000000 119
+  expect_code 1 "volume : 119 Kio pour 120 requis -> refus" check_space full
+  check "message : requis, disponible et manque, en octets" \
+    grep -q "requis 122880 octets.*disponible 121856 octets.*manque 1024 octets" "$TEST_ROOT/log/out"
+  check "message : système de fichiers et usage nommés" grep -q "sur /mnt/volumes (volume:uploads)" "$TEST_ROOT/log/out"
+  two_fs 1000000 120
+  expect_code 0 "marge respectée : 120 Kio exactement pour 120 requis -> passage" check_space full
+  RESTORE_SPACE_MARGIN_PERCENT=0
+  two_fs 1000000 100
+  expect_code 0 "marge configurable : à 0 %, 100 Kio suffisent" check_space full
+  RESTORE_SPACE_MARGIN_PERCENT=20
+
+  one_fs 239
+  expect_code 1 "même système de fichiers : besoins additionnés (240 Kio requis, 239 dispo) -> refus" check_space full
+  check "message : les deux usages du même système de fichiers" \
+    grep -q "sur /mnt/unique (dossier-de-travail volume:uploads)" "$TEST_ROOT/log/out"
+  one_fs 240
+  expect_code 0 "même système de fichiers, 240 Kio -> passage" check_space full
+
+  COMPONENTS=(db uploads) DUMP_SIZE=51200
+  two_fs 179 1000000
+  expect_code 1 "dump compté dans le dossier de travail (180 Kio requis, 179 dispo) -> refus" check_space full
+  COMPONENTS=(uploads) DUMP_SIZE=0
+
+  restore_fixture
+  app_state true
+  STOP_APP=1
+  DATA_SIZE=([uploads]=102400)
+  two_fs 1000000 1
+  expect_code 1 "--stop-app, espace insuffisant juste avant l'écriture" under_trap write_target
+  check "contrôle d'espace échoué : indicateur non posé" test "$(flag)" = 0
+  check "contrôle d'espace échoué : application redémarrée" app_running
+  check "contrôle d'espace échoué : volume intact" test -z "$(ls -A "$FX_TARGET")"
+
+  printf '%s\n' \
+    '{"struct_type":"snapshot"}' \
+    "{\"struct_type\":\"node\",\"path\":\"$mp\",\"type\":\"dir\",\"size\":4096,\"uid\":82,\"gid\":82,\"mode\":2147484141}" \
+    "{\"struct_type\":\"node\",\"path\":\"$mp/a.jpg\",\"type\":\"file\",\"size\":100,\"uid\":82,\"gid\":82,\"mode\":420}" \
+    "{\"struct_type\":\"node\",\"path\":\"$mp/b.jpg\",\"type\":\"file\",\"size\":250,\"uid\":82,\"gid\":82,\"mode\":420}" \
+    "{\"struct_type\":\"node\",\"path\":\"${mp}2/intrus\",\"type\":\"file\",\"size\":999,\"uid\":0,\"gid\":0,\"mode\":420}" \
+    >"$TEST_ROOT/restic/ls.json"
+  WORK_DIR=$TEST_ROOT/fx/work SNAP_ID=x SNAP_SHORT=x COMPONENTS=(uploads) M_MP=([uploads]=$mp)
+  mkdir -p "$WORK_DIR" # supprimé par le on_exit du cas précédent
+  load_listings
+  check "taille estimée depuis l'instantané : fichiers seuls, sous le volume seul (350 octets)" \
+    test "${DATA_SIZE[uploads]}" = 350
+  SNAP_ENV=staging M_DB_FILE=alivaon_db.sql
+  printf '%s\n' '{"struct_type":"snapshot"}' \
+    "{\"struct_type\":\"node\",\"path\":\"$ALIVAON_DUMP_ROOT/staging/alivaon_db.sql\",\"type\":\"file\",\"size\":51200}" \
+    >"$TEST_ROOT/restic/ls.json"
+  load_dump_size
+  check "taille du dump lue dans l'instantané (51200 octets)" test "$DUMP_SIZE" = 51200
+)
+
 {
   section_a
   section_b
@@ -639,6 +850,9 @@ section_j() (
   section_h
   section_i
   section_j
+  section_k
+  section_l
+  section_m
 } | tee "$RESULTS"
 
 pass=$(grep -c '^OK ' "$RESULTS")

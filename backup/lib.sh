@@ -166,11 +166,14 @@ validate_config() {
   : "${HC_PING_URL:=}"
   : "${RESTIC_EXCLUDE_FILE:=}"
   : "${RESTIC_CACHE_DIR:=$ALIVAON_DEFAULT_CACHE}"
+  : "${RESTORE_SPACE_MARGIN_PERCENT:=20}"
   export RESTIC_CACHE_DIR
 
   for v in KEEP_DAILY KEEP_WEEKLY KEEP_MONTHLY MAX_AGE_HOURS; do
     [[ ${!v} =~ ^[1-9][0-9]*$ ]] || die "$v doit être un entier positif (valeur : '${!v}')"
   done
+  [[ $RESTORE_SPACE_MARGIN_PERCENT =~ ^[0-9]+$ ]] ||
+    die "RESTORE_SPACE_MARGIN_PERCENT doit être un entier positif ou nul (valeur : '$RESTORE_SPACE_MARGIN_PERCENT')"
   [[ -z $HC_PING_URL || $HC_PING_URL == https://* ]] ||
     die "HC_PING_URL doit commencer par https:// (ou rester vide pour désactiver)"
   [[ -z $RESTIC_EXCLUDE_FILE || -f $RESTIC_EXCLUDE_FILE ]] ||
