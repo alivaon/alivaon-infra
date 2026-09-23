@@ -26,21 +26,34 @@ Valeurs à substituer, notées entre chevrons :
 
 ## Ordre d'exécution
 
-| Étape | Quoi | Où |
-|---|---|---|
-| 0 | Storage Box, puis **instantanés automatiques activés** (obligatoire) | Navigateur |
-| 1 | Mot de passe restic dans le gestionnaire, dépôt initialisé depuis le Mac, **test 0** | Mac |
-| 2 | Contrôle des hypothèses (noms de conteneurs, volumes, privilèges) | VPS |
-| — | Dans la même fenêtre : correctif du healthcheck MySQL, staging puis production ([runbook dédié](../docs/runbook-healthcheck-mysql.md)) | Mac, VPS |
-| 3 | Utilisateurs MySQL `backup`, un par environnement, et dump d'essai | VPS |
-| 4 | restic et outils | VPS |
-| 5 | Copie des sources sur le VPS | Mac |
-| 6 | Accès SSH du VPS à la Storage Box | VPS |
-| 7 | Mot de passe sur le VPS, **barrière de vérification**, `install.sh`, configuration | VPS |
-| 8 | Première sauvegarde manuelle | VPS |
-| 9 | `systemd-analyze verify` | VPS |
-| 10 | Activation des timers et du dead man's switch | VPS, navigateur |
-| 11 | **Test de restauration complet sur le staging** | VPS, Mac |
+> **La numérotation des étapes est historique : elle ne reflète PAS l'ordre
+> d'exécution.** Suivre ce tableau, de haut en bas, et non les numéros. Les
+> étapes ne sont pas renumérotées parce que des messages d'`install.sh` et de
+> `lib.sh` citent ces numéros.
+>
+> **En particulier : `install.sh` ne s'exécute plus à l'étape 5, mais à
+> l'étape 7.3**, après la barrière de vérification du mot de passe (7.2).
+> L'étape 5 ne fait plus que copier les sources.
+
+| Ordre | Étape | Quoi | Où |
+|---|---|---|---|
+| 1 | 0 | Storage Box, puis **instantanés automatiques activés** (obligatoire) | Navigateur |
+| 2 | 1 | Mot de passe restic dans le gestionnaire, dépôt créé depuis le Mac, **test 0** | Mac |
+| 3 | 2 | Constat initial de la topologie (fait le 2026-09-23, phase A), dont les contrôles SQL et ACL à la charge de l'opérateur | VPS |
+| 4 | 4 | restic et outils (prérequis de la barrière 7.2) | VPS |
+| 5 | 6 | Accès SSH du VPS à la Storage Box (prérequis de la barrière 7.2) | VPS |
+| 6 | 7.1 | Dépôt du fichier de mot de passe | VPS |
+| 7 | **7.2** | **Barrière** : le fichier ouvre le dépôt du test 0 | VPS |
+| 8 | — | Correctif du healthcheck MySQL, staging puis production ([runbook dédié](../docs/runbook-healthcheck-mysql.md)) | Mac, VPS |
+| 9 | 2 | **Confirmation** : la topologie n'a pas changé après la recréation des conteneurs MySQL | VPS |
+| 10 | 3 | Utilisateurs MySQL `backup`, un par environnement, et dump d'essai | Mac, VPS |
+| 11 | 5 | Copie des sources sur le VPS | Mac |
+| 12 | **7.3** | **`install.sh`** (anciennement étape 5) | VPS |
+| 13 | 7.4 | Configuration (`backup.env`) | VPS |
+| 14 | 8 | Première sauvegarde manuelle | VPS |
+| 15 | 9 | `systemd-analyze verify` | VPS |
+| 16 | 10 | Activation des timers et du dead man's switch | VPS, navigateur |
+| 17 | 11 | **Test de restauration complet sur le staging** | VPS, Mac |
 
 > ### La mise en place n'est terminée qu'à l'issue de l'étape 11
 >
@@ -51,34 +64,51 @@ Valeurs à substituer, notées entre chevrons :
 
 ---
 
-## Hypothèses
+## Topologie constatée
 
-Les fichiers compose de ce dépôt ne déclarent aucun `name:` de projet ni
-`container_name:` pour les stacks `production` et `staging`. Les noms ci-dessous
-en sont **déduits**, recoupés avec les autres fichiers du dépôt. Ils sont
-contrôlés à l'**étape 2**, avant toute écriture sur le serveur.
+Constatée sur le serveur le **2026-09-23** (phase A, en lecture seule) ; le
+détail des commandes et des sorties est dans
+[docs/journal-installation-sauvegarde.md](../docs/journal-installation-sauvegarde.md).
+Les éléments ci-dessous ne sont plus des hypothèses. Leurs identifiants H1 à
+H10 sont conservés comme repères ; chacun désigne l'élément de sa ligne. Un
+message d'erreur de `lib.sh` cite encore « hypothèse H9 » : il s'agit du
+pilote des volumes.
 
-| # | Hypothèse | Fondement dans le dépôt | Degré |
-|---|---|---|---|
-| H1 | Nom de projet Compose = nom du dossier (`production`, `staging`) | Aucun `name:` dans les compose ; volumes externes de `filebrowser/docker-compose.yml` nommés `production_uploads` et `staging_uploads_staging`, ce qui n'est vrai que sous cette hypothèse | **Confirmé** indirectement : File Browser tourne avec ces noms |
-| H2 | Volumes d'uploads : `production_uploads`, `staging_uploads_staging` | `filebrowser/docker-compose.yml`, section `volumes:` | **Confirmé** (même source) |
-| H3 | Volumes de CV : `production_cv_private`, `staging_cv_private_staging` | Commentaire d'en-tête de `filebrowser/docker-compose.yml` ; règle de nommage de H1 appliquée à `cv_private` et `cv_private_staging` | Déduit |
-| H4 | Le cache LiipImagine n'est **pas** dans un volume (défaut Liip : `public/media/cache`, dans la couche du conteneur, régénéré à la demande) | Aucun volume sur `public/media` dans les compose | **Non vérifiable depuis le dépôt**, la configuration Liip vit dans `alivaon-symfony` |
-| H5 | Conteneurs MySQL : `production-db-1`, `staging-db-1` | `ADMINER_DEFAULT_SERVER` dans `adminer/docker-compose.yml` | **Confirmé** |
-| H6 | Conteneurs applicatifs : `production-app-1`, `staging-app-1` | Règle `<projet>-<service>-1` de Compose v2, appliquée au service `app` | Déduit, **jamais vu écrit** dans le dépôt |
-| H7 | Base `alivaon_db`, utilisateur `alivaon_app`, avec `ALL PRIVILEGES ON alivaon_db.*` dans les deux environnements | README racine, « Connexion à Adminer » ; privilèges : comportement de l'image `mysql:8.0` pour `MYSQL_USER` | Noms confirmés, privilèges déduits |
-| H8 | Tables toutes InnoDB, aucune routine stockée ni événement | Application Doctrine standard | Déduit. `--single-transaction` n'est cohérent **que** pour InnoDB |
-| H9 | **Pilote `local` requis** pour chaque volume sauvegardé : seul ce pilote garantit que le point de montage donné par Docker est un dossier de l'hôte, lisible par restic et inscriptible par rsync | Aucun `driver:` dans les compose, donc pilote par défaut | Déduit. **Vérifié à chaque exécution** : les scripts refusent un volume absent ou d'un autre pilote (`resolve_volume`, `lib.sh`). Contrôlé aussi par la 3ᵉ commande de l'étape 2 |
-| H10 | PHP-FPM écrit dans les volumes sous l'UID:GID **82:82** (`www-data` de l'image), et la racine de chaque volume, `uploads` comme `cv_private`, lui appartient | README racine, « Connexion à File Browser » (uid 82, propriétaire réel des fichiers téléversés) ; `PUID`/`PGID` de `filebrowser/docker-compose.yml` | Confirmé pour `uploads` par le déploiement de File Browser, **déduit** pour `cv_private`. Constaté à la fin de l'étape 2 ; `restore.sh` le vérifie à chaque restauration (`<ENV>_APP_OWNER`) |
+Le serveur peut changer. Le dispositif revérifie donc à chaque exécution ce
+qui peut l'être : `resolve_volume` (volume présent, pilote `local`), contrôle
+de propriété avant et après restauration (`<ENV>_APP_OWNER`), capacités de
+rsync (`-A -X`) et version de restic. L'étape 2, rejouée, sert de contrôle de
+non-régression pour le reste.
+
+| # | Élément | Valeur constatée | Source du constat | Revérifié à l'exécution |
+|---|---|---|---|---|
+| H1 | Nom de projet Compose = nom du dossier | `production`, `staging` : noms des conteneurs et des volumes | `docker ps`, `docker volume ls` | via H2, H3, H5, H6 |
+| H2 | Volumes d'uploads | `production_uploads`, `staging_uploads_staging` (suffixe doublé en staging) | `docker volume ls` | oui, `resolve_volume` |
+| H3 | Volumes de CV | `production_cv_private`, `staging_cv_private_staging` (suffixe doublé en staging) | `docker volume ls` | oui, `resolve_volume` |
+| H4 | Cache LiipImagine | `public/media/cache` (`web_root %kernel.project_dir%/public`, `cache_prefix media/cache`), dans la couche du conteneur applicatif, **hors volume** : `RESTIC_EXCLUDE_FILE` vide | `liip_imagine.yaml` lu dans les deux conteneurs applicatifs | non |
+| H5 | Conteneurs MySQL | `production-db-1`, `staging-db-1` | `docker ps` | oui (conteneur en marche exigé) |
+| H6 | Conteneurs applicatifs | `production-app-1`, `staging-app-1` | `docker ps` | oui (`restore.sh`) |
+| H7 | Base, utilisateur applicatif | `alivaon_db`, `alivaon_app`, `ALL PRIVILEGES ON alivaon_db.*` | `SHOW GRANTS`, par l'opérateur | non |
+| H8 | Moteurs, routines, événements | InnoDB seul (29 fichiers `.ibd` par environnement) ; 0 routine, 0 événement | fichiers de `alivaon_db` ; requêtes SQL par l'opérateur | non |
+| H9 | Pilote des volumes | `local` pour les quatre, points de montage `/var/lib/docker/volumes/<nom>/_data` | `docker volume inspect` | oui, `resolve_volume` |
+| H10 | UID:GID de l'application | PHP-FPM `pool www` en **82:82** ; racine des quatre volumes en `82:82 755` ; aucun fichier hors UID 82, `cv_private` compris | `docker top`, `stat`, `find ! -user 82` | oui, `restore.sh` avant et après écriture |
+| — | ACL et attributs étendus | aucun sur les quatre volumes | `getfacl`, `getfattr`, par l'opérateur | oui : rsync `-A -X`, capacités vérifiées avant écriture |
+
+**Environnement constaté** (même date) : Ubuntu **26.04 LTS**, Docker
+**29.6.1**, systemd **259**, rsync **3.4.1** (ACLs et xattrs pris en charge),
+restic absent, installé par **apt** en **0.18.1** (étape 4). Un seul système
+de fichiers, `/dev/sda1`, porte le dossier de travail, les volumes et les
+données MySQL.
 
 **Les CV sont sauvegardés.** Le volume `cv_private` contient des fichiers
 téléversés par les candidats, absents de la base : sans sauvegarde, une perte
 du serveur les efface définitivement. Ils suivent la rétention générale, comme
 tout le reste (README, « Données des candidats »).
 
-**Chemins sur disque : aucun n'est supposé.** Les scripts demandent à Docker le
-point de montage de chaque volume à chaque exécution (`docker volume inspect`).
-Un `data-root` Docker non standard est donc pris en charge sans modification.
+**Chemins sur disque : aucun n'est codé en dur.** Les scripts demandent à
+Docker le point de montage de chaque volume à chaque exécution (`docker volume
+inspect`). Un `data-root` Docker différent serait donc pris en charge sans
+modification.
 
 ---
 
@@ -186,44 +216,62 @@ continuer** tant que le test 0 n'a pas réussi.
 
 ---
 
-## Étape 2 — Contrôler les hypothèses [VPS]
+## Étape 2 — Confirmer que la topologie n'a pas changé [VPS]
 
-Rien n'est modifié à cette étape, hormis l'installation de deux outils de
-lecture (`acl`, `attr`). Si un résultat diffère de l'attendu, corriger la
-valeur correspondante à l'étape 7, pas le code.
+La topologie a été constatée le 2026-09-23 (section « Topologie constatée »).
+Cette étape ne sert plus à la découvrir, mais à **confirmer qu'elle n'a pas
+changé** : elle se rejoue après le correctif du healthcheck, qui recrée les
+conteneurs MySQL, et avant toute réinstallation. Chaque **Vérifier** donne la
+valeur attendue : **tout écart = s'arrêter**, et comprendre avant de corriger
+la configuration (étape 7.4). Jamais le code.
+
+Rien n'est modifié à cette étape, hormis l'installation, idempotente, de deux
+outils de lecture (`acl`, `attr`).
 
 ```bash
 docker ps --format '{{.Names}}' | sort
 ```
 
 **Effet** : liste les conteneurs en cours d'exécution.
-**Vérifier (H5, H6)** : présence de `production-app-1`, `production-db-1`,
-`staging-app-1`, `staging-db-1`.
+**Vérifier (H5 conteneurs MySQL, H6 conteneurs applicatifs)** : présence de `production-app-1`, `production-db-1`,
+`staging-app-1`, `staging-db-1`, comme au constat du 2026-09-23. D'autres
+conteneurs peuvent tourner (`traefik`, `portainer`, `adminer-*`,
+`filebrowser`, `liens-canins`) : sans incidence ici.
 
 ```bash
 docker volume ls --format '{{.Name}}' | grep -E 'uploads|cv_private'
 ```
 
 **Effet** : liste les volumes de fichiers.
-**Vérifier (H2, H3)** : exactement `production_cv_private`, `production_uploads`,
-`staging_cv_private_staging`, `staging_uploads_staging`.
+**Vérifier (H2 volumes d'uploads, H3 volumes de CV)** : exactement ces quatre lignes, suffixe doublé des
+volumes de staging compris :
+
+```
+production_cv_private
+production_uploads
+staging_cv_private_staging
+staging_uploads_staging
+```
 
 ```bash
 docker volume inspect -f '{{.Name}} {{.Driver}} {{.Mountpoint}}' production_uploads production_cv_private staging_uploads_staging staging_cv_private_staging
 ```
 
 **Effet** : affiche le pilote et le point de montage de chaque volume.
-**Vérifier** : quatre lignes, sans erreur `no such volume`. **(H9)** Le pilote
-est `local` sur chaque ligne. Un autre pilote : s'arrêter, les scripts
-refuseraient ce volume.
+**Vérifier (H9 pilote des volumes)** : quatre lignes de la forme
+`production_uploads local /var/lib/docker/volumes/production_uploads/_data`,
+pilote `local` partout. Un autre pilote : s'arrêter, les scripts refuseraient
+ce volume.
 
 ```bash
 sudo du -sh $(docker volume inspect -f '{{.Mountpoint}}' production_uploads production_cv_private staging_uploads_staging staging_cv_private_staging)
 ```
 
 **Effet** : mesure le volume de fichiers à sauvegarder.
-**Vérifier** : noter les tailles. Elles servent à l'estimation de coût du
-README (section « Coût »).
+**Vérifier** : ordre de grandeur de la référence du 2026-09-23 (mesurée
+depuis les conteneurs applicatifs) : production 11,0 Mo d'uploads et 59,1 Mo
+de CV ; staging 9,5 Mo et 3,7 Mo. Une croissance est normale ; un volume
+soudain vide ne l'est pas. Voir README, « Dimensionnement constaté ».
 
 ```bash
 docker exec production-app-1 sh -c 'grep -rnE "cache_prefix|web_path|upload_destination|uri_prefix" /var/www/html/config/packages/ 2>/dev/null'
@@ -231,12 +279,14 @@ docker exec production-app-1 sh -c 'grep -rnE "cache_prefix|web_path|upload_dest
 
 **Effet** : affiche la configuration VichUploader et LiipImagine de
 l'application.
-**Vérifier (H4)** : les `upload_destination` pointent sous `public/uploads` ou
-`var/private` (les volumes). Si `cache_prefix` place le cache Liip **sous
-`uploads`**, le cache est dans le volume : créer un fichier d'exclusion
-(`/etc/alivaon-backup/exclude.txt`, une ligne par motif, par exemple
-`*/media/cache`) et le déclarer dans `RESTIC_EXCLUDE_FILE` à l'étape 7. Sinon,
-rien à faire.
+**Vérifier (H4 cache LiipImagine)** : comme au constat du 2026-09-23, les sept
+`upload_destination` pointent sous `%kernel.project_dir%/public/uploads/`
+(`articles`, `authors`, `projects`, `services`, `team`, `testimonials`,
+`users`), et `cache_prefix: media/cache` (avec `web_root` sur `public`) place
+le cache Liip **hors** volume : `RESTIC_EXCLUDE_FILE` reste vide. Si un jour
+`cache_prefix` plaçait le cache **sous `uploads`**, il faudrait un fichier
+d'exclusion (`/etc/alivaon-backup/exclude.txt`, un motif par ligne, par
+exemple `*/media/cache`) déclaré dans `RESTIC_EXCLUDE_FILE` (étape 7.4).
 
 ```bash
 docker exec -it production-db-1 mysql -u alivaon_app -p -e 'SHOW GRANTS'
@@ -246,8 +296,8 @@ docker exec -it production-db-1 mysql -u alivaon_app -p -e 'SHOW GRANTS'
 `/opt/alivaon/production/.env`), puis affiche les privilèges. Le `-p` sans
 valeur fait saisir le mot de passe de façon interactive : il n'apparaît pas
 dans `ps`.
-**Vérifier (H7)** : une ligne ``GRANT ALL PRIVILEGES ON `alivaon_db`.* TO
-`alivaon_app`@`%` ``. Cet utilisateur ne sert qu'à la **restauration** (la
+**Vérifier (H7 base et utilisateur applicatif)** : comme au constat, une ligne ``GRANT ALL PRIVILEGES ON
+`alivaon_db`.* TO `alivaon_app`@`%` ``. Cet utilisateur ne sert qu'à la **restauration** (la
 sauvegarde passe par l'utilisateur `backup`, étape 3) : sans `ALL`, il lui faut
 au minimum `CREATE, DROP, INSERT, ALTER, INDEX, REFERENCES` sur `alivaon_db`,
 pour supprimer puis recréer la base.
@@ -257,8 +307,8 @@ docker exec -it production-db-1 mysql -u alivaon_app -p -e "SELECT ENGINE, COUNT
 ```
 
 **Effet** : moteurs de stockage, nombre de routines et d'événements.
-**Vérifier (H8)** : `InnoDB` seul (une ligne `NULL` pour les vues est normale),
-`routines` = 0, `evenements` = 0. Une table MyISAM ne serait pas figée par
+**Vérifier (H8 moteurs, routines, événements)** : comme au constat, `InnoDB` seul (une ligne `NULL` pour les
+vues est normale), `routines` = 0, `evenements` = 0. Une table MyISAM ne serait pas figée par
 `--single-transaction` ; des routines ne seraient pas sauvegardées. Dans l'un
 ou l'autre cas, s'arrêter et adapter `DB_DUMP_SCRIPT` dans `lib.sh`.
 
@@ -269,13 +319,13 @@ docker exec -it staging-db-1 mysql -u alivaon_app -p -e 'SHOW GRANTS'
 **Effet / Vérifier** : identiques, pour le staging (mot de passe de
 `/opt/alivaon/staging/.env`).
 
-### UID/GID de référence de l'application (H10)
+### UID/GID de référence de l'application (H10, UID:GID de l'application)
 
 Les fichiers restaurés doivent appartenir à l'UID sous lequel PHP-FPM écrit.
 Si ce n'est pas le cas, la restauration paraît réussie et le premier
-téléversement échoue des heures plus tard. Les valeurs constatées ici sont la
-référence : elles vont dans `<ENV>_APP_OWNER` (étape 7), et `restore.sh` les
-vérifie.
+téléversement échoue des heures plus tard. Référence constatée le
+2026-09-23 : **82:82**, reportée dans `<ENV>_APP_OWNER` (étape 7.4) et
+vérifiée par `restore.sh`.
 
 ```bash
 docker top production-app-1 -o pid,uid,gid,args
@@ -283,10 +333,10 @@ docker top production-app-1 -o pid,uid,gid,args
 
 **Effet** : liste les processus du conteneur applicatif, avec leurs UID et GID
 numériques.
-**Vérifier** : les processus `php-fpm: pool ...` (les workers, qui traitent
-les requêtes et écrivent les fichiers) tournent sous `82 82`. Le processus
-`php-fpm: master process` peut être en `0 0` (root) : il n'écrit pas les
-fichiers. **Noter** l'UID:GID des workers.
+**Vérifier** : comme au constat, les processus `php-fpm: pool www` (les
+workers, qui traitent les requêtes et écrivent les fichiers) tournent sous
+`82 82` ; le `php-fpm: master process` en `0 0` (root) n'écrit pas les
+fichiers. Les workers `nginx` en `100 101` sont attendus aussi.
 
 ```bash
 docker exec production-app-1 stat -c '%u:%g %a %n' /var/www/html/public/uploads /var/www/html/var/private
@@ -294,10 +344,8 @@ docker exec production-app-1 stat -c '%u:%g %a %n' /var/www/html/public/uploads 
 
 **Effet** : propriétaire, groupe et droits de la racine des deux volumes, vus
 depuis le conteneur.
-**Vérifier** : les deux lignes portent l'UID:GID des workers (`82:82`), avec un
-droit d'écriture pour le propriétaire (`755` ou `775`). Un autre propriétaire,
-en particulier sur `var/private` (H10 y est déduite) : s'arrêter et le
-signaler.
+**Vérifier** : comme au constat, deux lignes `82:82 755`. Un autre
+propriétaire : s'arrêter et le signaler.
 
 ```bash
 docker exec production-app-1 find /var/www/html/public/uploads /var/www/html/var/private ! -user 82 -print
@@ -305,8 +353,9 @@ docker exec production-app-1 find /var/www/html/public/uploads /var/www/html/var
 
 **Effet** : liste les fichiers et dossiers des volumes qui n'appartiennent
 **pas** à l'UID 82.
-**Vérifier** : aucune sortie. Des lignes : les noter, ce sont des exceptions
-préexistantes que `restore.sh` reproduira telles quelles.
+**Vérifier** : aucune sortie, comme au constat. Des lignes : s'arrêter ; ce
+sont des fichiers apparus depuis sous un autre UID, à comprendre avant de
+poursuivre.
 
 ```bash
 docker top staging-app-1 -o pid,uid,gid,args
@@ -325,11 +374,10 @@ valeurs attendues.
 
 ### ACL et attributs étendus des volumes
 
-Ce n'est plus une hypothèse : `restore.sh` restaure ACL et attributs étendus
-(`rsync -A -X`), vérifie avant d'écrire que le rsync du serveur les prend en
-charge, et s'arrête avec un message explicite si le système de fichiers cible
-les refuse. Les commandes suivantes établissent le **fait** de départ : y en
-a-t-il, et lesquels ?
+`restore.sh` restaure ACL et attributs étendus (`rsync -A -X`), vérifie avant
+d'écrire que le rsync du serveur les prend en charge, et s'arrête avec un
+message explicite si le système de fichiers cible les refuse. Constat de
+référence : **aucune ACL, aucun attribut étendu** sur les quatre volumes.
 
 ```bash
 sudo apt-get install -y acl attr
@@ -345,8 +393,8 @@ sudo getfacl -R -s -p $(docker volume inspect -f '{{.Mountpoint}}' production_up
 **Effet** : liste, dans les quatre volumes, les fichiers et dossiers qui
 portent une ACL **au-delà** des droits Unix ordinaires (`-s` masque les
 autres).
-**Vérifier et noter** : aucune sortie, attendu, signifie qu'aucune ACL n'est
-posée. Des lignes : les noter ; elles seront restaurées telles quelles.
+**Vérifier** : aucune sortie, comme au constat. Des lignes : des ACL sont
+apparues ; les noter, elles seront restaurées telles quelles.
 
 ```bash
 sudo getfattr -R -d -m - $(docker volume inspect -f '{{.Mountpoint}}' production_uploads production_cv_private staging_uploads_staging staging_cv_private_staging)
@@ -354,20 +402,20 @@ sudo getfattr -R -d -m - $(docker volume inspect -f '{{.Mountpoint}}' production
 
 **Effet** : liste les attributs étendus de tous les espaces de noms (`-m -`)
 sur les quatre volumes.
-**Vérifier et noter** : aucune sortie, attendu, signifie aucun attribut
-étendu. Des lignes : les noter, avec leur espace de noms (`user.`,
-`security.`...) ; elles seront restaurées telles quelles, à condition que le
-système de fichiers du serveur les accepte (sinon `restore.sh` s'arrête et le
-dit).
+**Vérifier** : aucune sortie, comme au constat. Des lignes : des attributs
+sont apparus ; les noter, avec leur espace de noms (`user.`, `security.`...).
+Ils seront restaurés tels quels, à condition que le système de fichiers les
+accepte (sinon `restore.sh` s'arrête et le dit).
 
 > **Fenêtre de maintenance commune.** Le correctif du healthcheck MySQL
 > ([docs/runbook-healthcheck-mysql.md](../docs/runbook-healthcheck-mysql.md))
 > recrée les conteneurs MySQL : coupure de la base de **20 à 40 s par
-> environnement**. Le dérouler **ici**, entre l'étape 2 et l'étape 3, staging
-> d'abord, puis production dans le même créneau creux que cette mise en place :
-> la base n'est interrompue qu'une fois, et la première sauvegarde (étape 8)
-> porte sur les conteneurs définitifs. Les noms de conteneurs ne changent pas :
-> les constats de l'étape 2 restent valables.
+> environnement**. Dans l'ordre d'exécution (tableau en tête), il vient après
+> la barrière 7.2 et avant les comptes MySQL de l'étape 3, staging d'abord,
+> puis production dans le même créneau creux que cette mise en place : la base
+> n'est interrompue qu'une fois, et la première sauvegarde (étape 8) porte sur
+> les conteneurs définitifs. **Rejouer ensuite cette étape 2** : elle confirme
+> que la recréation n'a changé ni les noms, ni les volumes, ni les UID.
 
 ---
 
@@ -596,7 +644,7 @@ Le message d'accès refusé cite toujours le compte **tel que MySQL l'a
 | `Got error: 1044: Access denied for user 'backup'@'localhost' to database 'alivaon_db' when using LOCK TABLES` | Privilège manquant | Escalade 3.3, `LOCK TABLES` |
 | `Access denied; you need (at least one of) the PROCESS privilege(s)` | Privilège manquant | Escalade 3.3, `PROCESS` |
 | `Access denied; you need (at least one of) the RELOAD or FLUSH_TABLES privilege(s)` | Privilège manquant | Escalade 3.3, `RELOAD` |
-| `Warning: ... insufficient privileges to SHOW CREATE ...` | Routine stockée présente, contraire à H8 | `GRANT SHOW_ROUTINE ON *.* TO 'backup'@'localhost';`, puis rejouer le dump d'essai |
+| `Warning: ... insufficient privileges to SHOW CREATE ...` | Routine stockée présente, contraire à H8 (aucune routine constatée) | `GRANT SHOW_ROUTINE ON *.* TO 'backup'@'localhost';`, puis rejouer le dump d'essai |
 
 ### 3.3 — Escalade, seulement si le dump d'essai échoue sur un privilège
 
@@ -606,7 +654,7 @@ moins au plus large :
 
 | Ordre | Privilège | Portée | Ce qu'il permet | Quand il devient nécessaire |
 |---|---|---|---|---|
-| 1 | `LOCK TABLES` | `alivaon_db.*` | Poser des verrous en lecture sur les tables de la base | Une table n'est pas InnoDB (contraire à H8) : mysqldump la verrouille faute de pouvoir l'inclure dans la transaction |
+| 1 | `LOCK TABLES` | `alivaon_db.*` | Poser des verrous en lecture sur les tables de la base | Une table n'est pas InnoDB (contraire à H8 : InnoDB seul constaté) : mysqldump la verrouille faute de pouvoir l'inclure dans la transaction |
 | 2 | `PROCESS` | global | Voir les requêtes de **tous** les utilisateurs du serveur et lire les métadonnées d'InnoDB | Une version de mysqldump lit malgré tout les tablespaces |
 | 3 | `RELOAD` | global | `FLUSH` : vider les caches, fermer les tables, faire tourner les journaux, poser un verrou global en lecture | mysqldump émet un `FLUSH`, par exemple sous GTID |
 
@@ -658,9 +706,11 @@ apt-cache policy restic
 ```
 
 **Effet** : affiche la version de restic proposée par Ubuntu.
-**Vérifier** : la ligne `Candidate:`. Version **0.16 ou plus** (Ubuntu 24.04 :
-0.16.x), passer au bloc suivant. Version inférieure (Ubuntu 22.04 : 0.12.x),
-aller à « Variante : binaire officiel » plus bas.
+**Vérifier** : la ligne `Candidate:`. Constaté le 2026-09-23 sur ce serveur
+(Ubuntu **26.04 LTS**, Docker 29.6.1, systemd 259) : restic non installé,
+candidat **0.18.1**, au-delà du minimum de 0.16 : **voie apt**, bloc suivant.
+La « Variante : binaire officiel » plus bas ne sert qu'à un serveur dont la
+version proposée serait inférieure à 0.16 (Ubuntu 22.04 : 0.12.x).
 
 ```bash
 sudo apt-get install -y restic jq rsync curl
@@ -952,7 +1002,7 @@ sudo nano /etc/alivaon-backup/backup.env
   `/opt/alivaon/production/.env` ; `STAGING_DB_PASSWORD` : idem pour le
   staging. Utilisés par `restore.sh` seulement ;
 - tout nom qui a différé de l'attendu à l'étape 2 ;
-- `RESTIC_EXCLUDE_FILE`, seulement si l'étape 2 l'a rendu nécessaire (H4) ;
+- `RESTIC_EXCLUDE_FILE`, seulement si l'étape 2 l'a rendu nécessaire (H4, cache LiipImagine) ;
 - `PRODUCTION_APP_OWNER`, `STAGING_APP_OWNER` : l'UID:GID des workers
   PHP-FPM constaté à la fin de l'étape 2 (`82:82` attendu) ;
 - laisser `HC_PING_URL` vide pour l'instant (étape 10).

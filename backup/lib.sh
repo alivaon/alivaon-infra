@@ -263,7 +263,8 @@ container_running() {
 # sous-shell, pour que `die` interrompe bien le script appelant.
 #
 # Échec explicite si le volume est absent, ou si son pilote n'est pas `local`
-# (hypothèse H9) : seul ce pilote garantit que le point de montage est un
+# (constaté pour les quatre volumes le 2026-09-23) : seul ce pilote garantit
+# que le point de montage est un
 # dossier de l'hôte que restic peut lire et que rsync peut écrire. Un volume
 # d'un autre pilote (NFS, plugin tiers) serait sauvegardé vide ou pas du tout.
 VOLUME_MOUNTPOINT=''
@@ -274,6 +275,9 @@ resolve_volume() {
     die "volume Docker '$vol' introuvable${hint:+ : $hint}"
   IFS=' ' read -r driver mp <<<"$out"
   [[ $driver == local ]] ||
+    # « H9 » désigne, dans la documentation, l'exigence du pilote « local »
+    # (RUNBOOK-BACKUP.md, « Topologie constatée »). Chaîne conservée telle
+    # quelle : tests/run.sh la compare.
     die "volume Docker '$vol' : pilote '$driver' non pris en charge, seul le pilote 'local' l'est (hypothèse H9)"
   [[ -n $mp && -d $mp ]] ||
     die "volume Docker '$vol' : point de montage '$mp' absent de l'hôte"
@@ -372,7 +376,7 @@ EOF
 # --quick              : lignes écrites au fil de l'eau, sans tout charger en
 #                        mémoire.
 # --routines           : procédures et fonctions stockées (aucune attendue,
-#                        hypothèse H8 ; l'option garantit qu'une routine ajoutée
+#                        aucune constatée le 2026-09-23 ; l'option garantit qu'une routine ajoutée
 #                        plus tard ne serait pas perdue en silence).
 # --triggers           : déclencheurs (défaut de mysqldump, rendu explicite).
 # --no-tablespaces     : n'interroge pas INFORMATION_SCHEMA.FILES, qui exige le

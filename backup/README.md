@@ -131,11 +131,44 @@ priorité « alerte ».
 
 | Élément | Pourquoi |
 |---|---|
-| Variantes LiipImagine | Régénérées à la demande depuis les originaux (hypothèse H4 du runbook, à vérifier) |
+| Variantes LiipImagine | Dans `public/media/cache`, couche du conteneur applicatif, hors volume (constaté le 2026-09-23) ; régénérées à la demande depuis les originaux |
 | `production/.env`, `staging/.env` | Hors périmètre de ce chantier. Candidat naturel pour une extension, le dépôt étant chiffré |
 | `traefik/letsencrypt/acme.json` | Régénéré par Traefik. Le restaurer à tort consomme le quota Let's Encrypt (README racine) |
 | Dumps `pre-deploy-*.sql.gz` des stacks | Redondants avec les dumps quotidiens |
 | Images Docker, configuration | Dans `ghcr.io` et dans ce dépôt Git |
+
+---
+
+## Topologie constatée
+
+Constatée sur le serveur le **2026-09-23**, en lecture seule. Le détail des
+commandes et de leurs sorties est dans
+[docs/journal-installation-sauvegarde.md](../docs/journal-installation-sauvegarde.md) ;
+le tableau complet, avec les identifiants H1 à H10 et ce que chacun désigne,
+est dans RUNBOOK-BACKUP.md, « Topologie constatée ».
+
+| Élément | Production | Staging |
+|---|---|---|
+| Conteneur MySQL | `production-db-1` | `staging-db-1` |
+| Conteneur applicatif | `production-app-1` | `staging-app-1` |
+| Volume d'uploads | `production_uploads` | `staging_uploads_staging` |
+| Volume de CV | `production_cv_private` | `staging_cv_private_staging` |
+| Pilote des volumes | `local`, sous `/var/lib/docker/volumes/<nom>/_data` | idem |
+| UID:GID de PHP-FPM et des volumes | `82:82`, racines en `755`, aucun fichier hors UID 82 | idem |
+| Base | `alivaon_db`, InnoDB seul (29 tables), aucune routine ni événement | idem |
+| ACL, attributs étendus | aucun | aucun |
+
+Le suffixe `_staging` est **doublé** dans les deux volumes de staging. Le
+cache LiipImagine est dans `public/media/cache`, dans la couche du conteneur
+applicatif et non dans un volume : `RESTIC_EXCLUDE_FILE` reste vide.
+Environnement : Ubuntu 26.04 LTS, Docker 29.6.1, systemd 259, rsync 3.4.1
+(ACL et xattrs pris en charge), restic 0.18.1 installé par apt.
+
+Ces valeurs figurent par défaut dans `.env.example`. Le serveur pouvant
+changer, le dispositif revérifie à chaque exécution ce qui peut l'être :
+`resolve_volume` (volume présent, pilote `local`), contrôle de propriété avant
+et après restauration (`<ENV>_APP_OWNER`), capacités de rsync et version de
+restic. L'étape 2 du runbook, rejouée, confirme le reste.
 
 ---
 
@@ -181,22 +214,30 @@ rétablit s'ils ont dérivé.
 
 ## Installation
 
-Suivre [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md) de bout en bout, dans cet ordre :
+Suivre [RUNBOOK-BACKUP.md](RUNBOOK-BACKUP.md) dans l'ordre de son tableau
+« Ordre d'exécution ». **La numérotation de ses étapes est historique** et ne
+suit pas la séquence : `install.sh`, notamment, est à l'étape 7.3. Entre
+parenthèses, le numéro d'étape du runbook :
 
-1. instantanés automatiques de la Storage Box **activés** ;
-2. mot de passe restic dans le gestionnaire, dépôt créé depuis le Mac ;
-3. **test 0** : le dépôt s'ouvre depuis le Mac avec la seule copie du
-   gestionnaire ;
-4. étape 2 : vérification des noms (conteneurs, volumes) sur le VPS ;
-5. utilisateurs MySQL `backup` créés, dump d'essai ;
-6. `install.sh` ;
-7. première sauvegarde manuelle ;
-8. `systemd-analyze verify` ;
-9. activation des timers ;
-10. **test de restauration complet sur le staging.**
+1. instantanés automatiques de la Storage Box **activés** (0) ;
+2. mot de passe restic dans le gestionnaire, dépôt créé depuis le Mac, **test 0** (1) ;
+3. constat de la topologie, contrôles SQL et ACL (2, fait le 2026-09-23) ;
+4. restic et outils (4), accès SSH du VPS à la Storage Box (6) ;
+5. dépôt du fichier de mot de passe (7.1), puis **barrière** : le fichier
+   ouvre le dépôt du test 0 (7.2) ;
+6. correctif du healthcheck MySQL, staging puis production ;
+7. confirmation que la topologie n'a pas changé (2, rejouée) ;
+8. utilisateurs MySQL `backup`, dump d'essai (3) ;
+9. copie des sources (5), `install.sh` (7.3), configuration (7.4) ;
+10. première sauvegarde manuelle (8) ;
+11. `systemd-analyze verify` (9) ;
+12. activation des timers et du dead man's switch (10) ;
+13. **test de restauration complet sur le staging** (11).
 
-**La mise en place n'est terminée qu'au point 10**, quand les critères du test
-de restauration sont tous verts. Des timers actifs ne prouvent rien.
+**La mise en place n'est terminée qu'au point 13**, quand les critères C1 à
+C8 du test de restauration sont tous verts, téléversement réel compris.
+**L'activation des timers (point 12) ne la clôt pas** : des sauvegardes qui
+tournent ne prouvent pas qu'on sait restaurer.
 
 ---
 
@@ -316,7 +357,7 @@ comptée : elle se fait dans le volume de données MySQL, hors de ce contrôle.
 | production → staging | Refus, sauf `--allow-production-to-staging` (copie de données personnelles en préprod) |
 | Étiquette et manifeste discordants | Refus, code 3 |
 | Pas de terminal | Refus : la confirmation est toujours interactive |
-| Volume absent, ou pilote autre que `local` (H9) | Refus, avant toute écriture |
+| Volume absent, ou pilote autre que `local` (H9 : pilote des volumes) | Refus, avant toute écriture |
 | Conteneur applicatif en marche, sans `--stop-app` | Refus, avant toute écriture, avec la commande d'arrêt à lancer |
 | Volume à restaurer sans `--merge` ni `--mirror` | Refus : aucun mode par défaut |
 | `--mirror` | Nombre de fichiers à supprimer annoncé, seconde phrase à taper (`SUPPRIMER <n>`) ; refus si ce nombre change avant l'écriture |
@@ -417,6 +458,45 @@ la recopie des instantanés (`restic copy`).
 
 ---
 
+## Dimensionnement constaté
+
+Mesuré le 2026-09-23 :
+
+| | Uploads | CV | Base | Total |
+|---|---|---|---|---|
+| Production | 11,0 Mo | 59,1 Mo | 4,9 Mo | ≈ 75 Mo |
+| Staging | 9,5 Mo | 3,7 Mo | 4,7 Mo | ≈ 18 Mo |
+
+Un seul système de fichiers, `/dev/sda1` (75 Go), porte le dossier de travail
+(`/var/lib/alivaon-backup`), les volumes et les données MySQL (environ 200 Mo
+de répertoire de données par environnement), avec **64 Go libres**. Les
+besoins d'espace s'y **additionnent** : lors d'une restauration, l'extraction
+dans le dossier de travail puis la copie dans les volumes se cumulent.
+`restore.sh` le gère déjà : son contrôle d'espace additionne les besoins
+portant sur un même système de fichiers.
+
+Conséquences :
+
+- **Le contrôle d'espace passe très largement.** Une restauration complète de
+  la production demande environ 2 × 75 Mo, plus 20 % de marge, soit moins de
+  200 Mo, pour 64 Go libres.
+- **La relecture hebdomadaire est peu coûteuse.** Le dépôt pèse de l'ordre de
+  100 Mo ; 1/8 relu chaque semaine en SFTP représente une douzaine de Mo.
+- **Le dispositif est surdimensionné pour le volume actuel, et c'est voulu.**
+  Les mêmes mécanismes tiennent sans réglage pendant une croissance de
+  plusieurs ordres de grandeur.
+
+**Quand reconsidérer la cadence de relecture.** La contrainte est la durée du
+contrôle hebdomadaire, borné à 6 h (`TimeoutStartSec` de
+`alivaon-backup-verify.service`), et le débit SFTP de la Storage Box, qui sera
+mesuré à la première relecture. En ordre de grandeur, à quelques dizaines de
+Mo/s, relire 1/8 d'un dépôt de 1 To, soit 125 Go, prend une à deux heures. À
+revoir donc quand le dépôt approche **quelques centaines de Go**, ou dès que
+la durée mesurée du contrôle hebdomadaire dépasse **une heure** : relire une
+fraction plus petite, ou moins souvent.
+
+---
+
 ## Coût
 
 Tarifs Hetzner indicatifs (HT), **à revérifier** à la commande :
@@ -492,7 +572,9 @@ vider par `rsync --delete`. Rien de cela n'est codé.
   `MYSQL_PASSWORD` des stacks pour `restore.sh`. Une divergence ne gêne pas
   la sauvegarde, mais fait échouer la restauration : le test 1 mensuel la
   détecte.
-- **Pilote `local` requis** pour chaque volume sauvegardé (hypothèse H9),
+- **Pilote `local` requis** pour chaque volume sauvegardé (H9, pilote des
+  volumes ; constaté pour
+  les quatre volumes le 2026-09-23),
   vérifié à chaque exécution : un volume d'un autre pilote est refusé, la
   sauvegarde échoue plutôt que d'archiver un dossier vide.
 - **restic ≥ 0.16 requis** (`--retry-lock`, dépôt compressé). Vérifié au

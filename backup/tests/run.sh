@@ -12,6 +12,14 @@
 # de lui-même avec le bash de Homebrew (brew install bash). Les outils GNU
 # absents de macOS (stat -c, base64 -w, numfmt) sont traduits par tests/shims/.
 #
+# Exige aussi un rsync qui prend en charge -A (ACL) et -X (attributs étendus),
+# car restore.sh restaure en -aHAX et les tests appellent un VRAI rsync. Sur
+# macOS, l'openrsync du système (/usr/bin/rsync) ne connaît ni -A ni -X :
+# installer le rsync GNU, `brew install rsync`. L'enveloppe tests/mocks/bin/rsync
+# retient le premier rsync qui annonce « ACLs » et « xattrs » ; s'il n'y en a
+# aucun, les cas qui synchronisent un volume échouent avec le message « aucun
+# rsync avec ACL et xattrs ». Sur Linux (Ubuntu), le rsync du système convient.
+#
 # CE QUI EST COUVERT
 #   A. transport des identifiants MySQL, options et journalisation du dump
 #   B. les 15 garde-fous de restore.sh (politique d'environnement, manifeste,
@@ -409,6 +417,8 @@ section_g() (
   check "message : volume introuvable, avec l'indication" \
     grep -q "volume Docker 'vol_absent' introuvable : démarrer la stack" "$TEST_ROOT/log/out"
   expect_code 1 "pilote non local -> échec explicite" resolve_volume vol_nfs
+  # H9 : l'exigence du pilote « local » (RUNBOOK-BACKUP.md, « Topologie
+  # constatée »), citée telle quelle par le message d'erreur de lib.sh.
   check "message : pilote nommé et hypothèse H9 citée" \
     grep -q "pilote 'nfs' non pris en charge.*(hypothèse H9)" "$TEST_ROOT/log/out"
 
