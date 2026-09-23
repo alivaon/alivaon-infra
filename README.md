@@ -323,8 +323,11 @@ Détaillés dans [docs/traefik.md](docs/traefik.md) :
 - **`scripts/check-staging-auth.sh` n'est branché nulle part** — ni cron, ni
   pipeline. À raccorder à la supervision ou en fin de job de déploiement du
   staging.
-- **Aucune sauvegarde hors serveur** — les dumps `backups/` et `acme.json` ne
-  vivent que sur le VPS. Une perte du serveur les emporte.
+- **Sauvegarde hors serveur : prête, pas encore installée.** Le dispositif
+  restic (bases MySQL et volumes d'uploads, production et staging) est dans
+  [backup/](backup/README.md). Tant que [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md)
+  n'a pas été déroulé sur le VPS, une perte du serveur emporte tout. Restent
+  hors périmètre : les `.env` des stacks et `acme.json`.
 
 ## Accès à Portainer
 
@@ -596,8 +599,10 @@ planifiée ne les traite.
 
 La lecture seule sur la production protège des suppressions accidentelles **par
 File Browser**, mais ne remplace pas une sauvegarde : elle ne couvre ni la perte
-du serveur, ni une suppression par l'application elle-même. Sujet distinct, à
-traiter pour lui-même — voir « Aucune sauvegarde hors serveur » dans les
+du serveur, ni une suppression par l'application elle-même.
+
+Le dispositif qui couvre ces volumes est prêt dans [backup/](backup/README.md),
+**en attente d'installation** : voir « Sauvegarde hors serveur » dans les
 chantiers ouverts.
 
 ---
@@ -611,6 +616,10 @@ chantiers ouverts.
 - [docs/acces-admin.md](docs/acces-admin.md) — guide d'accès aux trois interfaces
   d'administration : tunnel SSH, connexion à Adminer et à File Browser,
   emplacement des mots de passe, dépannage
+- [backup/README.md](backup/README.md) — sauvegarde chiffrée hors machine
+  (restic) : fonctionnement, exploitation, restauration, rotation du mot de
+  passe, coût. Mise en place : [backup/RUNBOOK-BACKUP.md](backup/RUNBOOK-BACKUP.md) ;
+  tests : [backup/RUNBOOK-RESTORE-TEST.md](backup/RUNBOOK-RESTORE-TEST.md)
 
 ## Portée de ce dépôt
 

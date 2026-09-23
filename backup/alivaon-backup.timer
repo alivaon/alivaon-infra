@@ -1,0 +1,18 @@
+# /etc/systemd/system/alivaon-backup.timer
+#
+# Une sauvegarde par nuit, heure de Paris quel que soit le fuseau du serveur.
+# Contrôle : systemctl list-timers alivaon-backup.timer
+
+[Unit]
+Description=Alivaon — sauvegarde quotidienne (03:15 Europe/Paris)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Europe/Paris
+# Étale le démarrage : évite de tomber pile sur d'autres tâches de 03:15.
+RandomizedDelaySec=10min
+# Serveur éteint à l'heure prévue : la sauvegarde est rattrapée au démarrage.
+Persistent=true
+Unit=alivaon-backup.service
+
+[Install]
+WantedBy=timers.target

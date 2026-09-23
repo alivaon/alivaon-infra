@@ -1,0 +1,30 @@
+# /etc/systemd/system/alivaon-backup-failure.service
+#
+# Démarrée par systemd quand alivaon-backup.service échoue (OnFailure=).
+# Journalise l'échec en priorité « err » avec l'extrait de l'exécution
+# fautive, et, si HC_PING_URL est renseigné dans la configuration, le signale
+# au dead man's switch (healthchecks.io ou compatible).
+#
+# Désactiver la notification externe : laisser HC_PING_URL vide. Le journal
+# reste alimenté dans tous les cas.
+#
+# Test à blanc : systemctl start alivaon-backup-failure.service
+
+[Unit]
+Description=Alivaon — notification d'échec de la sauvegarde
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/alivaon-backup/notify-failure.sh alivaon-backup.service
+User=root
+TimeoutStartSec=2min
+
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

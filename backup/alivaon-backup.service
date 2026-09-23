@@ -1,0 +1,54 @@
+# /etc/systemd/system/alivaon-backup.service
+#
+# Sauvegarde chiffrée hors machine (MySQL production + staging, volumes
+# d'uploads) vers le dépôt restic. Déclenchée par alivaon-backup.timer.
+# Lancement manuel : systemctl start alivaon-backup.service
+# Journal         : journalctl -u alivaon-backup.service
+#
+# En cas d'échec (code non nul, délai dépassé, signal), systemd démarre
+# alivaon-backup-failure.service.
+
+[Unit]
+Description=Alivaon — sauvegarde chiffrée hors machine (restic)
+Documentation=https://github.com/alivaon/alivaon-infra/tree/main/backup
+Wants=network-online.target
+After=network-online.target docker.service
+OnFailure=alivaon-backup-failure.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/alivaon-backup/backup.sh
+
+# root : les points de montage des volumes Docker (/var/lib/docker/volumes)
+# et la configuration ne sont lisibles que par lui.
+User=root
+
+# Dossiers gérés par systemd, créés en 0700 : dumps temporaires et cache
+# restic (le cache évite de retélécharger les index à chaque exécution).
+StateDirectory=alivaon-backup
+StateDirectoryMode=0700
+CacheDirectory=alivaon-backup
+CacheDirectoryMode=0700
+Environment=RESTIC_CACHE_DIR=/var/cache/alivaon-backup
+
+# Les sites restent prioritaires sur la sauvegarde.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# Au-delà, l'exécution est tuée et considérée comme un échec (OnFailure).
+TimeoutStartSec=6h
+
+# Durcissement. /etc, /usr et /boot en lecture seule : configuration, mot de
+# passe restic, clé SSH et known_hosts de la Storage Box (tous sous
+# /etc/alivaon-backup) sont lus, jamais écrits. /root en lecture seule. /var
+# reste inscriptible : dumps, cache restic, volumes Docker lus.
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
