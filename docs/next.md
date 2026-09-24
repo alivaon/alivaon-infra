@@ -337,7 +337,7 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 22:46 | Copie anonymisée prod → staging, 1er passage : anonymisation correcte mais contrôle mal lu (en-tête MySQL multiligne) → filet de sécurité : tables personnelles du staging vidées, `app` et `web` laissés arrêtés. Aucune donnée en clair exposée. Script corrigé (`mysql -N`) | `/opt/alivaon/backups/staging-20260924-204644/` (**staging d'avant la copie**, horodatage du serveur en UTC) |
 | 24/09/2026 22:47 | Copie anonymisée, 2e passage : base de production sans `user` ni `messenger_messages` (production en lecture seule), 174 candidatures et 14 messages anonymisés (contrôle : 0 ligne en clair, échantillon vérifié), uploads 66 fichiers / 11 292 Ko identiques à la production, `cv_private` non copié ; `app` et `web` healthy, base non recréée, migrations 22/22 ; `diff-vps.sh` : identique | `/opt/alivaon/backups/staging-20260924-204751/` (état intermédiaire) |
 | 24/09/2026 22:52 | Staging : `cache:pool:clear cache.app` (sitemap mis en cache avec l'hôte de la première requête, commun aux deux hôtes du staging) | — |
-| 24/09/2026 23:30 | Contrôle final (données de production) : Next contre Symfony du staging = 11 écarts connus, aucun de contenu ; contre la production = mêmes 11 + noindex/`robots.txt` du staging ; Lighthouse sans régression. Nouvelle référence `prod-2026-09-24b` (alivaon-site PR #1) | — |
+| 24/09/2026 23:10 | Contrôle final (données de production) : Next contre Symfony du staging = 11 écarts connus, aucun de contenu ; contre la production = mêmes 11 + noindex/`robots.txt` du staging ; Lighthouse sans régression. Nouvelle référence `prod-2026-09-24b` (alivaon-site PR #1) | — |
 
 ### Enseignements pour la production
 
