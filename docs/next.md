@@ -27,31 +27,54 @@ Chaque dépôt ne tire et ne relance **que ses services** :
 Un `pull` global échouerait : le `GITHUB_TOKEN` d'un dépôt ne lit pas les images
 de l'autre.
 
-## Routage staging (branche `feat/next-staging`)
+## Hôtes : la forme `www` est canonique
+
+Comme `alivaon.com` → `www.alivaon.com`, chaque hôte n'est servi que sous sa
+forme `www` ; la forme sans `www` redirige en **301** (routeur dédié, service
+`noop@internal`, déclaré sur le conteneur de l'hôte : un redémarrage de
+Symfony ne coupe pas la redirection).
+
+| Forme sans www (301) | Hôte canonique |
+|---|---|
+| `admin.alivaon.com` | `www.admin.alivaon.com` |
+| `admin.staging.alivaon.com` | `www.admin.staging.alivaon.com` |
+| `preview.staging.alivaon.com` | `www.preview.staging.alivaon.com` |
+
+## Routage staging
 
 Tous les hôtes sont derrière la BasicAuth du staging.
 
 | Hôte | Chemins | Service | Priorité |
 |---|---|---|---|
 | `www.staging.alivaon.com` | tout | `app` (Symfony, inchangé) | — |
-| `admin.staging.alivaon.com` | `/api/admin`, `/api/auth`, `/uploads/` | `app` | 100 |
-| `admin.staging.alivaon.com` | tout le reste | `admin` | 10 |
-| `preview.staging.alivaon.com` | `/api/public`, `/uploads/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt` | `app` | 100 |
-| `preview.staging.alivaon.com` | tout le reste | `web` | 10 |
+| `www.admin.staging.alivaon.com` | `/api/admin`, `/api/auth`, `/uploads/` | `app` | 100 |
+| `www.admin.staging.alivaon.com` | tout le reste | `admin` | 10 |
+| `www.preview.staging.alivaon.com` | `/api/public`, `/uploads/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt` | `app` | 100 |
+| `www.preview.staging.alivaon.com` | tout le reste | `web` | 10 |
 
-`admin.*` et `preview.*` renvoient aussi `X-Robots-Tag: noindex, nofollow`.
-`/api/admin` n'est jamais routé sur `preview` ni sur `www`.
+Les hôtes admin et preview renvoient aussi `X-Robots-Tag: noindex, nofollow`.
+`/api/admin` n'est jamais routé sur `preview` ni sur `www.staging`.
 
-## Routage cible de production (non appliqué)
+## Routage de production
 
-À appliquer par étapes : l'admin en phase 3, le site à la bascule (phase 5).
+### En service (back-office, depuis le 24/09/2026)
+
+| Hôte | Chemins | Service | Priorité |
+|---|---|---|---|
+| `www.alivaon.com` (et apex → 301) | `/api`, `/api/…` | `app`, chemin remplacé : même 404 Symfony qu'avant l'API | 100 |
+| `www.alivaon.com` (et apex → 301) | tout le reste | `app` (site Twig et EasyAdmin, inchangés) | — |
+| `www.admin.alivaon.com` | `/api/admin`, `/api/auth`, `/uploads/` | `app` | 100 |
+| `www.admin.alivaon.com` | tout le reste | `admin` (+ `X-Robots-Tag: noindex, nofollow`) | 10 |
+
+EasyAdmin reste disponible sur `www.alivaon.com/admin` pendant la prise en
+main du nouveau back-office.
+
+### Cible à la bascule du site (phase 5, non appliquée)
 
 | Hôte | Chemins | Service |
 |---|---|---|
-| `admin.alivaon.com` | `/api/admin`, `/api/auth`, `/uploads/` | `app` |
-| `admin.alivaon.com` | tout le reste | `admin` (+ `X-Robots-Tag: noindex`) |
 | `www.alivaon.com` | `/api/public`, `/uploads/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt`, `/invitation` | `app` |
-| `www.alivaon.com` | `/admin*`, `/login` | redirection 301 vers `admin.alivaon.com` |
+| `www.alivaon.com` | `/admin*`, `/login` | redirection 301 vers `www.admin.alivaon.com` |
 | `www.alivaon.com` | tout le reste | `web` |
 
 Retour arrière de la bascule : remettre le routeur `www` → `app` (quelques
@@ -72,19 +95,19 @@ déploiement habituel).
 Chez le registrar, deux enregistrements A vers l'IP du VPS (la même que
 `www.staging.alivaon.com`) :
 
-- `admin.staging.alivaon.com`
-- `preview.staging.alivaon.com`
+- `admin.staging.alivaon.com` et `www.admin.staging.alivaon.com`
+- `preview.staging.alivaon.com` et `www.preview.staging.alivaon.com`
 
 Vérifier la propagation.
 
 Mac :
 ```bash
-dig +short admin.staging.alivaon.com
+dig +short www.admin.staging.alivaon.com
 ```
 
 Mac :
 ```bash
-dig +short preview.staging.alivaon.com
+dig +short www.preview.staging.alivaon.com
 ```
 
 Les deux doivent renvoyer l'IP du VPS. Le certificat Let's Encrypt est obtenu
@@ -159,12 +182,12 @@ démarre `web` et `admin` sur le staging (workflow `Deploy`).
 
 Mac :
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://admin.staging.alivaon.com
+curl -s -o /dev/null -w '%{http_code}\n' https://www.admin.staging.alivaon.com
 ```
 
 Mac :
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://preview.staging.alivaon.com
+curl -s -o /dev/null -w '%{http_code}\n' https://www.preview.staging.alivaon.com
 ```
 
 Mac :
