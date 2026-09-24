@@ -15,9 +15,18 @@ contrôle de parité SEO sans écart (`alivaon-next/docs/seo-parity.md`).
 | `web` | `ghcr.io/alivaon/alivaon-next-site:<env>` | Site public Next.js |
 | `admin` | `ghcr.io/alivaon/alivaon-next-admin:<env>` | Back-office Next.js |
 
-`web` et `admin` rejoignent `traefik_proxy` et le réseau interne (appels à
-Symfony par `http://app`). Ils ne reçoivent **aucun** secret Symfony
-(variables `environment:` explicites, pas d'`env_file`).
+`web` rejoint `traefik_proxy` et le réseau interne ; `admin` seulement
+`traefik_proxy` (ses appels passent par son propre hôte). Ils ne reçoivent
+**aucun** secret Symfony (variables `environment:` explicites, pas
+d'`env_file`).
+
+**Noms internes : toujours un alias propre à la pile**, jamais `app` ni
+`web`. Les piles staging et production partagent `traefik_proxy`, et le DNS
+Docker y résout `app` vers les deux Symfony à la fois (constaté le
+24/09/2026 : le front du staging lisait au hasard l'API de production).
+Staging : `staging-api` (Symfony) et `staging-site` (Next), déclarés sur le
+réseau interne ; production à la bascule : `production-api` et
+`production-site`.
 
 Chaque dépôt ne tire et ne relance **que ses services** :
 - `alivaon-symfony` → `docker compose pull app` / `up -d app` (branche
@@ -147,7 +156,7 @@ php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'
 Ajouter à `/opt/alivaon/staging/.env`, avec la valeur générée :
 
 ```dotenv
-NEXT_REVALIDATE_URL=http://web:3000/api/revalidate
+NEXT_REVALIDATE_URL=http://staging-site:3000/api/revalidate
 NEXT_REVALIDATE_SECRET=<valeur générée>
 ```
 
