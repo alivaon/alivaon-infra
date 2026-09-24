@@ -44,16 +44,16 @@ services:
       # Symfony sert aussi l'API et les fichiers sur les hôtes Next. Priorité
       # haute : ces chemins passent avant le routeur « tout le reste » du
       # conteneur Next du même hôte.
-      # admin.staging : API d'administration, authentification, images.
-      - "traefik.http.routers.alivaon-staging-admin-api.rule=Host(`admin.staging.alivaon.com`) && (PathPrefix(`/api/admin`) || PathPrefix(`/api/auth`) || PathPrefix(`/uploads/`))"
+      # www.admin.staging : API d'administration, authentification, images.
+      - "traefik.http.routers.alivaon-staging-admin-api.rule=Host(`www.admin.staging.alivaon.com`) && (PathPrefix(`/api/admin`) || PathPrefix(`/api/auth`) || PathPrefix(`/uploads/`))"
       - "traefik.http.routers.alivaon-staging-admin-api.priority=100"
       - "traefik.http.routers.alivaon-staging-admin-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-admin-api.tls.certresolver=letsencrypt"
       - "traefik.http.routers.alivaon-staging-admin-api.middlewares=staging-auth,staging-noindex"
       - "traefik.http.routers.alivaon-staging-admin-api.service=alivaon-staging"
-      # preview.staging : API publique, images et fichiers SEO servis par Symfony
+      # www.preview.staging : API publique, images et fichiers SEO servis par Symfony
       # (sitemap et robots inchangés — robots en Disallow: / car APP_STAGING=1).
-      - "traefik.http.routers.alivaon-staging-preview-api.rule=Host(`preview.staging.alivaon.com`) && (PathPrefix(`/api/public`) || PathPrefix(`/uploads/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`))"
+      - "traefik.http.routers.alivaon-staging-preview-api.rule=Host(`www.preview.staging.alivaon.com`) && (PathPrefix(`/api/public`) || PathPrefix(`/uploads/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`))"
       - "traefik.http.routers.alivaon-staging-preview-api.priority=100"
       - "traefik.http.routers.alivaon-staging-preview-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-preview-api.tls.certresolver=letsencrypt"
@@ -69,7 +69,7 @@ services:
       start_period: 40s
 
   # ── Front Next.js (dépôt alivaon-next) ─────────────────────────────────
-  # Site public, en prévisualisation sur preview.staging tant qu'il n'a pas
+  # Site public, en prévisualisation sur www.preview.staging tant qu'il n'a pas
   # passé le contrôle de parité SEO (www.staging reste servi par Symfony).
   web:
     image: ghcr.io/alivaon/alivaon-next-site:staging
@@ -78,7 +78,7 @@ services:
     # les secrets Symfony.
     environment:
       API_INTERNAL_URL: http://app
-      SITE_ORIGIN: https://preview.staging.alivaon.com
+      SITE_ORIGIN: https://www.preview.staging.alivaon.com
       NEXT_REVALIDATE_SECRET: ${NEXT_REVALIDATE_SECRET}
     networks:
       - traefik_proxy
@@ -86,34 +86,50 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik_proxy"
-      - "traefik.http.routers.alivaon-staging-preview.rule=Host(`preview.staging.alivaon.com`)"
+      - "traefik.http.routers.alivaon-staging-preview.rule=Host(`www.preview.staging.alivaon.com`)"
       - "traefik.http.routers.alivaon-staging-preview.priority=10"
       - "traefik.http.routers.alivaon-staging-preview.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-preview.tls.certresolver=letsencrypt"
       - "traefik.http.routers.alivaon-staging-preview.middlewares=staging-auth,staging-noindex"
       - "traefik.http.routers.alivaon-staging-preview.service=alivaon-staging-web"
       - "traefik.http.services.alivaon-staging-web.loadbalancer.server.port=3000"
+      # preview.staging -> www.preview.staging (301, canonique = www).
+      - "traefik.http.routers.alivaon-staging-preview-canonical.rule=Host(`preview.staging.alivaon.com`)"
+      - "traefik.http.routers.alivaon-staging-preview-canonical.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-staging-preview-canonical.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-staging-preview-canonical.middlewares=staging-preview-canonical"
+      - "traefik.http.routers.alivaon-staging-preview-canonical.service=noop@internal"
+      - "traefik.http.middlewares.staging-preview-canonical.redirectregex.regex=^https?://preview\\.staging\\.alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.staging-preview-canonical.redirectregex.replacement=https://www.preview.staging.alivaon.com/$${1}"
+      - "traefik.http.middlewares.staging-preview-canonical.redirectregex.permanent=true"
 
   # Back-office Next.js.
   admin:
     image: ghcr.io/alivaon/alivaon-next-admin:staging
     restart: unless-stopped
-    environment:
-      API_INTERNAL_URL: http://app
-      ADMIN_ORIGIN: https://admin.staging.alivaon.com
+    # Ni variable ni réseau interne : le navigateur appelle l'API sur la même
+    # origine (routeur alivaon-staging-admin-api), comme en production.
     networks:
       - traefik_proxy
-      - internal
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik_proxy"
-      - "traefik.http.routers.alivaon-staging-admin.rule=Host(`admin.staging.alivaon.com`)"
+      - "traefik.http.routers.alivaon-staging-admin.rule=Host(`www.admin.staging.alivaon.com`)"
       - "traefik.http.routers.alivaon-staging-admin.priority=10"
       - "traefik.http.routers.alivaon-staging-admin.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-admin.tls.certresolver=letsencrypt"
       - "traefik.http.routers.alivaon-staging-admin.middlewares=staging-auth,staging-noindex"
       - "traefik.http.routers.alivaon-staging-admin.service=alivaon-staging-admin"
       - "traefik.http.services.alivaon-staging-admin.loadbalancer.server.port=3000"
+      # admin.staging -> www.admin.staging (301, canonique = www).
+      - "traefik.http.routers.alivaon-staging-admin-canonical.rule=Host(`admin.staging.alivaon.com`)"
+      - "traefik.http.routers.alivaon-staging-admin-canonical.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-staging-admin-canonical.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-staging-admin-canonical.middlewares=staging-admin-canonical"
+      - "traefik.http.routers.alivaon-staging-admin-canonical.service=noop@internal"
+      - "traefik.http.middlewares.staging-admin-canonical.redirectregex.regex=^https?://admin\\.staging\\.alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.staging-admin-canonical.redirectregex.replacement=https://www.admin.staging.alivaon.com/$${1}"
+      - "traefik.http.middlewares.staging-admin-canonical.redirectregex.permanent=true"
 
   db:
     image: mysql:8.0

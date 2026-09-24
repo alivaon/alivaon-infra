@@ -1,6 +1,7 @@
 # Stack PRODUCTION — déployée dans /opt/alivaon/production/.
 # Domaines : alivaon.com + www.alivaon.com (site Symfony),
-#            admin.alivaon.com (back-office Next.js + API d'administration).
+#            www.admin.alivaon.com (back-office Next.js + API d'administration ;
+#            admin.alivaon.com redirige en 301, canonique = www comme le site).
 #
 # L'image est référencée par tag mouvant `production` : le pipeline pousse
 # à la fois un tag SHA (traçable) et le tag `production`, et fait un `pull`.
@@ -42,7 +43,7 @@ services:
       # Port interne du conteneur (nginx).
       - "traefik.http.services.alivaon.loadbalancer.server.port=80"
       # www : l'API n'est pas exposée (même 404 Symfony qu'avant son arrivée).
-      # /api/admin et /api/auth ne sont servis que sur admin.alivaon.com ;
+      # /api/admin et /api/auth ne sont servis que sur www.admin.alivaon.com ;
       # /api/public ne s'ouvrira sur www qu'à la bascule du site Next.js.
       - "traefik.http.routers.alivaon-api-hidden.rule=(Host(`alivaon.com`) || Host(`www.alivaon.com`)) && (Path(`/api`) || PathPrefix(`/api/`))"
       - "traefik.http.routers.alivaon-api-hidden.priority=100"
@@ -52,9 +53,9 @@ services:
       - "traefik.http.routers.alivaon-api-hidden.middlewares=alivaon-canonical,alivaon-api-hidden"
       - "traefik.http.routers.alivaon-api-hidden.service=alivaon"
       - "traefik.http.middlewares.alivaon-api-hidden.replacepath.path=/api-non-disponible"
-      # admin.alivaon.com : API d'administration, authentification et images
+      # www.admin.alivaon.com : API d'administration, authentification et images
       # vers Symfony ; tout le reste vers le conteneur admin (Next.js).
-      - "traefik.http.routers.alivaon-admin-api.rule=Host(`admin.alivaon.com`) && (PathPrefix(`/api/admin`) || PathPrefix(`/api/auth`) || PathPrefix(`/uploads/`))"
+      - "traefik.http.routers.alivaon-admin-api.rule=Host(`www.admin.alivaon.com`) && (PathPrefix(`/api/admin`) || PathPrefix(`/api/auth`) || PathPrefix(`/uploads/`))"
       - "traefik.http.routers.alivaon-admin-api.priority=100"
       - "traefik.http.routers.alivaon-admin-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-admin-api.tls=true"
@@ -79,7 +80,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik_proxy"
-      - "traefik.http.routers.alivaon-admin.rule=Host(`admin.alivaon.com`)"
+      - "traefik.http.routers.alivaon-admin.rule=Host(`www.admin.alivaon.com`)"
       - "traefik.http.routers.alivaon-admin.priority=10"
       - "traefik.http.routers.alivaon-admin.entrypoints=websecure"
       - "traefik.http.routers.alivaon-admin.tls=true"
@@ -90,6 +91,16 @@ services:
       # pas le routeur de l'admin (enseignement du staging, docs/next.md).
       - "traefik.http.middlewares.alivaon-admin-noindex.headers.customresponseheaders.X-Robots-Tag=noindex, nofollow"
       - "traefik.http.services.alivaon-admin.loadbalancer.server.port=3000"
+      # admin.alivaon.com -> www.admin.alivaon.com (301, canonique = www).
+      - "traefik.http.routers.alivaon-admin-canonical.rule=Host(`admin.alivaon.com`)"
+      - "traefik.http.routers.alivaon-admin-canonical.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-admin-canonical.tls=true"
+      - "traefik.http.routers.alivaon-admin-canonical.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-admin-canonical.middlewares=alivaon-admin-canonical"
+      - "traefik.http.routers.alivaon-admin-canonical.service=noop@internal"
+      - "traefik.http.middlewares.alivaon-admin-canonical.redirectregex.regex=^https?://admin\\.alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.alivaon-admin-canonical.redirectregex.replacement=https://www.admin.alivaon.com/$${1}"
+      - "traefik.http.middlewares.alivaon-admin-canonical.redirectregex.permanent=true"
 
   db:
     image: mysql:8.0
