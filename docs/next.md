@@ -175,3 +175,16 @@ curl -s -o /dev/null -w '%{http_code}\n' https://www.staging.alivaon.com
 Les trois doivent renvoyer **401** (BasicAuth). Un 200 signifie que la
 protection est tombée (`STAGING_BASICAUTH` vide, voir « Pièges connus » du
 README).
+
+## Journal des actions sur le serveur
+
+Actions exécutées directement sur le VPS (accès SSH accordé par le
+propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
+(`*.bak-AAAAMMJJ-HHMMSS`).
+
+| Date | Action | Sauvegarde |
+|---|---|---|
+| 24/09/2026 10:19 | `diff-vps.sh` depuis `main` : serveur identique au dépôt | — |
+| 24/09/2026 10:19 | Clé SSH dédiée au déploiement d'alivaon-next (ED25519, `SHA256:AOqe0EdM7bnKoHIy8zidQb4O/qZA504oyMwm27Jwovk`) ajoutée à `~alivaondev/.ssh/authorized_keys` ; clé privée uniquement dans le secret `VPS_SSH_KEY` du dépôt (supprimée du poste). Révocation : retirer la ligne « github-actions alivaon-next » | `authorized_keys.bak-20260924-101919` |
+| 24/09/2026 10:20 | `NEXT_REVALIDATE_URL` et `NEXT_REVALIDATE_SECRET` (64 caractères) ajoutés à `/opt/alivaon/staging/.env` | `.env.bak-20260924-102008` |
+
