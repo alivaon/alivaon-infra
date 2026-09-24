@@ -116,13 +116,19 @@ services:
       - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.regex=^https?://[^/]+/.*"
       - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.replacement=https://www.admin.alivaon.com/"
       - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.permanent=true"
+      # Déploiement sans coupure (workflow d'alivaon-site) : une requête
+      # envoyée au conteneur qui s'arrête (connexion refusée) est rejouée sur
+      # le nouveau. Ne jamais changer ces labels pendant un remplacement à deux
+      # conteneurs (définitions divergentes = routeur désactivé) : les changer
+      # par une recréation simple de web.
+      - "traefik.http.middlewares.alivaon-web-retry.retry.attempts=3"
       # 1) Tout le reste de www → Next.js.
       - "traefik.http.routers.alivaon-web.rule=Host(`alivaon.com`) || Host(`www.alivaon.com`)"
       - "traefik.http.routers.alivaon-web.priority=60"
       - "traefik.http.routers.alivaon-web.entrypoints=websecure"
       - "traefik.http.routers.alivaon-web.tls=true"
       - "traefik.http.routers.alivaon-web.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-web.middlewares=alivaon-web-canonical,alivaon-web-slashes"
+      - "traefik.http.routers.alivaon-web.middlewares=alivaon-web-canonical,alivaon-web-slashes,alivaon-web-retry"
       - "traefik.http.routers.alivaon-web.service=alivaon-web"
       - "traefik.http.services.alivaon-web.loadbalancer.server.port=3000"
       # 2) Chemins toujours servis par Symfony (même liste que la préversion
