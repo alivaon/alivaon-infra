@@ -250,6 +250,44 @@ Routage : restaurer `docker-compose.yml.bak-20260924-143902` (production)
 puis `docker compose up -d --no-deps app`, et remettre le dépôt en accord
 (revert des PR #3 et #4).
 
+## Copie de la production vers le staging (anonymisée)
+
+Pour le dernier contrôle de parité avant la bascule : le staging reçoit le
+contenu de la production (base + fichiers publics), données personnelles
+anonymisées. Autorisée par le propriétaire le 24/09/2026.
+
+Mac :
+```bash
+./scripts/diff-vps.sh
+ssh alivaon 'bash -s' < scripts/staging-copie-prod.sh
+./scripts/diff-vps.sh
+```
+
+Ce que fait `scripts/staging-copie-prod.sh` (sur le VPS) :
+
+1. sauvegarde la base et les uploads du staging dans
+   `/opt/alivaon/backups/staging-<horodatage>/` ;
+2. arrête `app` et `web` du staging (pas `db`) ;
+3. copie la base de production **sans** `user` (le staging garde ses comptes)
+   ni `messenger_messages` ; production en lecture seule
+   (`mysqldump --single-transaction`) ;
+4. anonymise `candidate_application`, `contact_message` et `comment`
+   (adresses `@staging.invalid`, téléphones, IP, CV et textes libres) et
+   vérifie qu'il ne reste aucune ligne en clair — sinon vide ces tables et
+   s'arrête ;
+5. remplace les uploads du staging par ceux de la production (volume monté en
+   lecture seule) ; `cv_private` n'est jamais copié ;
+6. redémarre `app`, recrée `web` (cache de Next vidé) et affiche un bilan.
+
+Restauration du staging d'avant la copie (VPS) :
+```bash
+cd /opt/alivaon/staging && docker compose stop web app
+B=/opt/alivaon/backups/staging-<horodatage>
+gunzip -c $B/staging-db.sql.gz | docker exec -i staging-db-1 sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -u root "$MYSQL_DATABASE"'
+docker run --rm --user 0:0 -v staging_uploads_staging:/dst -v $B:/src:ro --entrypoint sh ghcr.io/alivaon/alivaon-symfony:staging -c 'find /dst -mindepth 1 -delete && tar -C /dst -xzf /src/staging-uploads.tar.gz'
+docker compose start app && docker compose up -d --force-recreate --no-deps web
+```
+
 ## Journal des actions sur le serveur
 
 Actions exécutées directement sur le VPS (accès SSH accordé par le
