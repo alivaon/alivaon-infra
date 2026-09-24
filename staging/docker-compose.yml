@@ -101,13 +101,17 @@ services:
       - "traefik.http.middlewares.staging-web-legacy-admin.redirectregex.regex=^https?://[^/]+/.*"
       - "traefik.http.middlewares.staging-web-legacy-admin.redirectregex.replacement=https://www.admin.staging.alivaon.com/"
       - "traefik.http.middlewares.staging-web-legacy-admin.redirectregex.permanent=true"
+      # Déploiement sans coupure (workflow d'alivaon-site) : pendant le
+      # remplacement, une requête envoyée au conteneur qui s'arrête (connexion
+      # refusée) est rejouée sur le nouveau.
+      - "traefik.http.middlewares.staging-web-retry.retry.attempts=3"
       # 1) Tout le reste de www.staging → Next.js. Priorité 80 : au-dessus du
       #    routeur de repli alivaon-staging (priorité implicite 63).
       - "traefik.http.routers.alivaon-staging-web.rule=Host(`staging.alivaon.com`) || Host(`www.staging.alivaon.com`)"
       - "traefik.http.routers.alivaon-staging-web.priority=80"
       - "traefik.http.routers.alivaon-staging-web.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-web.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-web.middlewares=staging-web-canonical,staging-web-auth,staging-web-noindex,staging-web-slashes"
+      - "traefik.http.routers.alivaon-staging-web.middlewares=staging-web-canonical,staging-web-auth,staging-web-noindex,staging-web-slashes,staging-web-retry"
       - "traefik.http.routers.alivaon-staging-web.service=alivaon-staging-web"
       - "traefik.http.services.alivaon-staging-web.loadbalancer.server.port=3000"
       # 2) Chemins toujours servis par Symfony (même liste que la production).
