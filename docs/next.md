@@ -120,11 +120,13 @@ Symfony. `db` n'est pas recréée (`.env` inchangé, `--no-deps`).
    cd /opt/alivaon/production
    umask 077; printf 'NEXT_REVALIDATE_SECRET=%s\n' "$(openssl rand -hex 32)" > .env.next
    ```
-4. Sauvegarde du compose, copie, puis :
+4. Sauvegarde du compose, copie, `docker compose config -q`. Le serveur n'a
+   pas d'identifiants GHCR permanents (seulement le jeton de chaque
+   pipeline) : un `pull` à la main est refusé. `web` se démarre donc en
+   relançant le job « Déploiement production (site) » du dernier run
+   `Deploy` de `main` d'alivaon-site, puis `app` (image déjà présente) :
    ```bash
-   docker compose config -q
-   docker compose pull web
-   docker compose up -d --no-deps app web
+   docker compose up -d --no-deps --pull never app
    ```
 5. Contrôles : `app` et `web` healthy ; `production-api` et `production-site`
    résolus vers une seule adresse ; depuis `web`, pages FR/EN en 200 avec le
@@ -389,6 +391,11 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 22:52 | Staging : `cache:pool:clear cache.app` (sitemap mis en cache avec l'hôte de la première requête, commun aux deux hôtes du staging) | — |
 | 24/09/2026 23:10 | Contrôle final (données de production) : Next contre Symfony du staging = 11 écarts connus, aucun de contenu ; contre la production = mêmes 11 + noindex/`robots.txt` du staging ; Lighthouse sans régression. Nouvelle référence `prod-2026-09-24b` (alivaon-site PR #1) | — |
 | 24/09/2026 23:28 | PR alivaon-infra #9, alivaon-site #1 et alivaon-admin #2 fusionnées (accord du propriétaire) ; pipeline d'alivaon-admin (`main`, a79ff52) → `admin` redéployé en production, healthy (image fonctionnellement identique : dépôt réduit au back-office). Contrôles : `www.admin` 200, apex → 301, `/api/auth/me` → 401 sans session, `X-Robots-Tag: noindex, nofollow` ; `app` et `db` de production non touchés ; `www` 200, `/api…` → 404 ; `diff-vps.sh` : identique | — |
+| 25/09/2026 00:05 | alivaon-site PR #2 (déploiement de production) et alivaon-infra PR #11 (étape A) fusionnées ; image `alivaon-next-site:production` publiée, déploiement sauté (web absent) | — |
+| 25/09/2026 00:12 | Étape A : `diff-vps.sh` (1 écart attendu) ; `.env.next` créé (600, secret de 64 caractères, jamais affiché) ; compose de production copié, `config` valide. `pull` manuel refusé par GHCR (pas d'identifiants permanents sur le serveur) : rien d'autre modifié à ce moment ; `diff-vps.sh` : identique | `production/docker-compose.yml.bak-20260925-001250` |
+| 25/09/2026 00:15 | `web` démarré par le pipeline d'alivaon-site (job de production relancé), healthy, **non routé** | — |
+| 25/09/2026 00:16 | `docker compose up -d --no-deps --pull never app` : `app` recréé (alias `production-api`, régénération), healthy en 18 s ; base non recréée ; `www` 200 | — |
+| 25/09/2026 00:20 | Contrôles étape A : `production-api` / `production-site` résolus vers une seule adresse ; secret identique dans `app` et `web` (empreintes) ; régénération joignable (401 sans secret) ; **Next de production (tunnel SSH) contre `prod-2026-09-24b` : 74/74 pages identiques** (seul écart : `/invitation`, qui reste servi par Symfony) ; GA présent ; `www` contre `prod-2026-09-24b` : 0 écart ; `diff-vps.sh` : identique | — |
 
 ### Enseignements pour la production
 
