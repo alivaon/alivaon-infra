@@ -88,6 +88,9 @@ main du nouveau back-office.
 
 ### Bascule du site (phase 5) — runbook
 
+> **Effectuée le 25/09/2026 à 00:28** : `www.alivaon.com` est servi par Next.js
+> (parité 0 écart bloquant, Lighthouse sans régression). Voir le journal.
+
 Contrôle préalable réussi le 24/09/2026 (staging avec les données de
 production : Next = Symfony hors écarts validés ; Lighthouse sans régression ;
 référence `alivaon-site/tests/seo-baseline/prod-2026-09-24b`).
@@ -396,6 +399,11 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 25/09/2026 00:15 | `web` démarré par le pipeline d'alivaon-site (job de production relancé), healthy, **non routé** | — |
 | 25/09/2026 00:16 | `docker compose up -d --no-deps --pull never app` : `app` recréé (alias `production-api`, régénération), healthy en 18 s ; base non recréée ; `www` 200 | — |
 | 25/09/2026 00:20 | Contrôles étape A : `production-api` / `production-site` résolus vers une seule adresse ; secret identique dans `app` et `web` (empreintes) ; régénération joignable (401 sans secret) ; **Next de production (tunnel SSH) contre `prod-2026-09-24b` : 74/74 pages identiques** (seul écart : `/invitation`, qui reste servi par Symfony) ; GA présent ; `www` contre `prod-2026-09-24b` : 0 écart ; `diff-vps.sh` : identique | — |
+| 25/09/2026 00:27 | alivaon-infra PR #12 (étape B) fusionnée ; `diff-vps.sh` : 1 écart attendu (compose de production) | — |
+| 25/09/2026 00:28 | **Bascule** : compose copié, `config` valide, `docker compose up -d --no-deps --pull never web` ; `web` healthy en quelques secondes, Symfony non redémarré ; `diff-vps.sh` : identique | `production/docker-compose.yml.bak-20260925-002817` |
+| 25/09/2026 00:30 | Contrôles immédiats : pages servies par Next.js ; 69 ressources de l'accueil en 200 (thème, uploads, `_next`) ; apex, `http`, slash final → 301 ; `//blog` 200 ; sitemap, robots, llms servis par Symfony ; `/api/public` 200, reste de `/api` 404 ; `/admin*`, `/login`, `/logout` → 301 `www.admin.alivaon.com` ; GA présent | — |
+| 25/09/2026 00:40 | **Parité de `www` contre `prod-2026-09-24b` : 0 écart bloquant** (74 pages, 117 sondes, 47 entrées de sitemap ; 9 exceptions validées : ancien EasyAdmin, `?page=0`) ; formulaires contact, commentaire, candidature → 422 sur envoi vide (rien créé) ; régénération signée `app` → `web` : 200 | — |
+| 25/09/2026 00:55 | Lighthouse (18 gabarits) : aucune régression. `/en` : LCP ≈ 19 s identique sous Symfony (staging, données de production : 18,4 s) et Next (19,0 / 19,4 s) mesurés au même moment — la mesure Symfony de 22:xx (8,1 s) relevait de la variance | — |
 
 ### Enseignements pour la production
 
