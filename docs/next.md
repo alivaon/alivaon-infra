@@ -199,6 +199,48 @@ Les trois doivent renvoyer **401** (BasicAuth). Un 200 signifie que la
 protection est tombée (`STAGING_BASICAUTH` vide, voir « Pièges connus » du
 README).
 
+## Mise en production du back-office — runbook
+
+Appliqué le 24/09/2026 (voir le journal). Ordre retenu pour ne redémarrer
+Symfony qu'une fois :
+
+1. Compose de production (service `admin`, routeurs) copié sur le serveur,
+   **sans redémarrage** (sauvegarde + `diff-vps.sh` avant/après).
+2. Fusion de l'API dans `main` d'alivaon-symfony : le pipeline recrée `app`
+   (nouvelle image et nouveaux routeurs d'un coup). Base non recréée : le
+   `.env` de production n'est pas modifié.
+3. Push sur `main` d'alivaon-next : image `alivaon-next-admin:production`,
+   déploiement du seul service `admin`.
+4. Contrôles : parité SEO de `www` contre la référence de production
+   (`pnpm seo:snapshot --origin https://www.alivaon.com --seeds-from
+   prod-2026-09-24 --label _work/…` puis `pnpm seo:compare`), `/api` en 404 sur
+   `www`, `admin.alivaon.com` → 301, TLS, `noindex`, connexion.
+
+### Retour arrière
+
+Back-office seul (le site n'en dépend pas) :
+
+VPS :
+```bash
+cd /opt/alivaon/production && docker compose stop admin
+```
+
+Symfony : revenir à la version d'avant l'API (commit `c15eab7`). Le serveur
+ne garde pas les anciennes images et le registre est privé : relancer le
+déploiement GitHub de ce commit, qui reconstruit et redéploie cette version
+(`app` seul) :
+
+Mac :
+```bash
+gh run rerun 35972439677 --repo alivaon/alivaon-symfony
+```
+
+Ou, pour un retour durable, `git revert -m 1 <merge de la PR #140>` sur `main`.
+
+Routage : restaurer `docker-compose.yml.bak-20260924-143902` (production)
+puis `docker compose up -d --no-deps app`, et remettre le dépôt en accord
+(revert des PR #3 et #4).
+
 ## Journal des actions sur le serveur
 
 Actions exécutées directement sur le VPS (accès SSH accordé par le
@@ -216,10 +258,18 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 10:54 | `docker compose up -d app` : app recréé (nouveaux routeurs, variables de régénération). **db recréée aussi** (son `.env` a changé) : coupure de quelques secondes, données intactes (volume) | — |
 | 24/09/2026 10:54 | Certificats Let's Encrypt obtenus pour `admin.staging` et `preview.staging` (1re tentative sur `preview` refusée : un validateur voyait encore l'ancienne IP ; 2e réussie) | — |
 | 24/09/2026 10:55 | Contrôles : 401 + TLS valide sur les 3 hôtes ; web → API interne avec hôte public ; app → régénération 200, sans secret 401 ; production inchangée | — |
+| 24/09/2026 14:25 | `diff-vps.sh` depuis `main` : identique | — |
+| 24/09/2026 14:39 | PR #3 (admin en production) et #4 (hôtes canoniques en www) fusionnées ; `diff-vps.sh` : exactement 2 écarts attendus (les deux composes) ; composes production et staging copiés, `docker compose config` valide ; `diff-vps.sh` après : identique. **Aucun redémarrage en production à cette étape** | `production/docker-compose.yml.bak-20260924-143902`, `staging/docker-compose.yml.bak-20260924-143902` |
+| 24/09/2026 14:39 | Staging : `docker compose up -d --no-deps app web admin` (hôtes en www, admin sans réseau interne ni variable) ; base non recréée. Erreurs Traefik `staging-noindex` pendant les 10 s du redémarrage d'`app` (connu, voir Enseignements), aucune ensuite | — |
+| 24/09/2026 14:40 | Contrôles staging : `admin.staging` et `preview.staging` → 301 vers `www.…` (chemin et paramètres conservés), 401 sur les hôtes www, certificats `www.admin.staging` et `www.preview.staging` obtenus | — |
+| 24/09/2026 14:49 | alivaon-symfony PR #140 (API) fusionnée → pipeline : `app` recréé en production (image `13cd368`). Retour arrière : relancer le déploiement de `c15eab7` (run 35972439677, voir « Retour arrière »). Base non recréée | — |
+| 24/09/2026 14:50 | Contrôles production : `www` 200, apex → 301, `/api…` sur www et apex → 404 (comme avant), EasyAdmin inchangé, `www.admin.alivaon.com/api/…` → 401 sans session. **Parité SEO contre `prod-2026-09-24` : 0 écart** (74 pages, 117 sondes, 47 entrées de sitemap) | — |
+| 24/09/2026 14:53 | alivaon-next `main` → image `alivaon-next-admin:production`, service `admin` créé en production, healthy | — |
+| 24/09/2026 14:55 | Contrôles admin : `admin.alivaon.com` → 301 `www.admin.alivaon.com`, TLS valide, `X-Robots-Tag: noindex, nofollow`, `robots.txt` Disallow, `/uploads/` servi par Symfony, connexion refusée proprement (401) ; `diff-vps.sh` : identique | — |
 
 ### Enseignements pour la production
 
 - **Modifier le `.env` d'une stack recrée aussi `db`** au prochain `docker compose up -d app` (y compris par le pipeline Symfony) : prévoir l'ajout des variables Next en production à un moment calme, ou ajouter le service `db` à `env_file` séparé.
-- Les middlewares `staging-auth` et `staging-noindex` sont déclarés dans les labels du conteneur `app` : pendant un redémarrage d'`app`, les routeurs de `web` et `admin` qui les référencent sont désactivés (404, jamais d'exposition). Pour la production, déclarer ces middlewares dans la configuration dynamique de Traefik (fichier) plutôt que sur un conteneur.
+- Les middlewares `staging-auth` et `staging-noindex` sont déclarés dans les labels du conteneur `app` : pendant un redémarrage d'`app`, les routeurs de `web` et `admin` qui les référencent sont désactivés (404, jamais d'exposition). **Appliqué en production** : chaque middleware est déclaré sur le conteneur du routeur qui l'utilise (noindex et redirection de l'admin sur `admin`), un redémarrage de Symfony ne coupe pas l'admin.
 - Côté DNS o2switch : créer les enregistrements dans l'**Éditeur de zone**, jamais via « Sous-domaines » (qui pointe vers l'hébergement o2switch).
 
