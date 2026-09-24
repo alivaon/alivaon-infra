@@ -86,16 +86,66 @@ Les hôtes admin et preview renvoient aussi `X-Robots-Tag: noindex, nofollow`.
 EasyAdmin reste disponible sur `www.alivaon.com/admin` pendant la prise en
 main du nouveau back-office.
 
-### Cible à la bascule du site (phase 5, non appliquée)
+### Bascule du site (phase 5) — runbook
 
-| Hôte | Chemins | Service |
-|---|---|---|
-| `www.alivaon.com` | `/api/public`, `/uploads/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt`, `/invitation` | `app` |
-| `www.alivaon.com` | `/admin*`, `/login` | redirection 301 vers `www.admin.alivaon.com` |
-| `www.alivaon.com` | tout le reste | `web` |
+Contrôle préalable réussi le 24/09/2026 (staging avec les données de
+production : Next = Symfony hors écarts validés ; Lighthouse sans régression ;
+référence `alivaon-site/tests/seo-baseline/prod-2026-09-24b`).
 
-Retour arrière de la bascule : remettre le routeur `www` → `app` (quelques
-minutes, la base ne change pas).
+Routage cible de `www.alivaon.com` (et de l'apex, redirigé en 301) :
+
+| Chemins | Service |
+|---|---|
+| `/api/public` | `app` (le reste de `/api` reste masqué : 404) |
+| `/uploads/`, `/build/`, `/vandor/`, `/bundles/`, `/assets/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt`, `/favicon.ico`, `/ping`, `/invitation` | `app` |
+| `/admin*`, `/login`, `/logout` | 301 vers `https://www.admin.alivaon.com/` (décision du 24/09/2026) |
+| tout le reste | `web` |
+
+Tous ces routeurs sont portés par `web` (priorités 60 à 120, au-dessus du
+routeur historique `alivaon` de Symfony, priorité implicite 47) : la bascule
+ne recrée que `web`, et Traefik n'envoie le trafic qu'une fois `web` healthy.
+
+#### Étape A — `web` démarré, non routé (aucun changement visible)
+
+Coupure de quelques secondes du site : `app` est recréé (alias
+`production-api`, variables de régénération), comme à chaque déploiement
+Symfony. `db` n'est pas recréée (`.env` inchangé, `--no-deps`).
+
+1. alivaon-infra : PR « étape A » fusionnée ; alivaon-site : PR « production »
+   fusionnée (publie `alivaon-next-site:production` ; le déploiement se
+   saute tant que `web` n'existe pas sur le serveur).
+2. Mac : `./scripts/diff-vps.sh` (1 écart attendu : compose de production).
+3. VPS — secret de régénération, jamais affiché :
+   ```bash
+   cd /opt/alivaon/production
+   umask 077; printf 'NEXT_REVALIDATE_SECRET=%s\n' "$(openssl rand -hex 32)" > .env.next
+   ```
+4. Sauvegarde du compose, copie, puis :
+   ```bash
+   docker compose config -q
+   docker compose pull web
+   docker compose up -d --no-deps app web
+   ```
+5. Contrôles : `app` et `web` healthy ; `production-api` et `production-site`
+   résolus vers une seule adresse ; depuis `web`, pages FR/EN en 200 avec le
+   titre et la canonique de la production ; régénération joignable depuis
+   `app` (401 sans secret) ; `www` inchangé (parité contre
+   `prod-2026-09-24b` : 0 écart) ; `diff-vps.sh` identique.
+
+#### Étape B — bascule de `www`
+
+1. alivaon-infra : PR « étape B » fusionnée ; `diff-vps.sh` (1 écart attendu).
+2. Sauvegarde du compose, copie, puis `docker compose up -d --no-deps web`.
+3. Contrôles immédiats : parité de `www` contre `prod-2026-09-24b` (exceptions
+   validées : `?page=0` → 404, `/admin*` `/login` `/logout` → 301),
+   formulaires (contact, commentaire, candidature) sur l'API publique, Google
+   Analytics présent, régénération après une modification dans l'admin,
+   Lighthouse.
+
+**Retour arrière (secondes)** : `docker compose stop web` — ses routeurs
+disparaissent, `www` revient au site Symfony (inchangé, même base). Puis
+restaurer le compose sauvegardé et `docker compose up -d --no-deps web`
+(non routé) pour que le serveur corresponde de nouveau au dépôt.
 
 ## Mise en service du staging — runbook
 
