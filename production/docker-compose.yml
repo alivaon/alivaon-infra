@@ -1,5 +1,6 @@
 # Stack PRODUCTION — déployée dans /opt/alivaon/production/.
-# Domaines : alivaon.com + www.alivaon.com (site Symfony),
+# Domaines : alivaon.com + www.alivaon.com (site Symfony ; site Next.js `web`
+#            démarré mais non routé jusqu'à la bascule, docs/next.md),
 #            www.admin.alivaon.com (back-office Next.js + API d'administration ;
 #            admin.alivaon.com redirige en 301, canonique = www comme le site).
 #
@@ -12,6 +13,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      # Secret partagé avec le site Next.js (régénération des pages). Fichier
+      # à part : modifier .env recréerait aussi db.
+      - .env.next
+    environment:
+      NEXT_REVALIDATE_URL: http://production-site:3000/api/revalidate
     volumes:
       # Uploads utilisateurs persistants (VichUploader).
       - uploads:/var/www/html/public/uploads
@@ -19,8 +25,12 @@ services:
       # pour survivre à la recréation du conteneur à chaque déploiement.
       - cv_private:/var/www/html/var/private
     networks:
-      - traefik_proxy   # exposition via Traefik
-      - internal        # accès à la base
+      traefik_proxy: {}   # exposition via Traefik
+      # Accès à la base ; alias propre à la pile : sur traefik_proxy, « app »
+      # désigne aussi le Symfony du staging (le DNS Docker renvoie les deux).
+      internal:
+        aliases:
+          - production-api
     depends_on:
       db:
         condition: service_healthy
@@ -68,7 +78,30 @@ services:
       retries: 3
       start_period: 40s
 
-  # Back-office Next.js (dépôt alivaon-next, pipeline limité à ce service).
+  # Site public Next.js (dépôt alivaon-site, pipeline limité à ce service).
+  # Étape A de la bascule : démarré mais NON ROUTÉ (www reste servi par
+  # Symfony). L'étape B ajoute ses routeurs (docs/next.md, « Bascule du site »).
+  web:
+    image: ghcr.io/alivaon/alivaon-next-site:production
+    restart: unless-stopped
+    # Variables explicites + le seul secret de régénération : ni base ni
+    # secrets Symfony.
+    env_file:
+      - .env.next
+    environment:
+      API_INTERNAL_URL: http://production-api
+      SITE_ORIGIN: https://www.alivaon.com
+      GA_MEASUREMENT_ID: G-B4FFE2DZ7N
+    networks:
+      traefik_proxy: {}
+      # Jamais « web » ni « app » entre services (voir app).
+      internal:
+        aliases:
+          - production-site
+    labels:
+      - "traefik.enable=false"
+
+  # Back-office Next.js (dépôt alivaon-admin, pipeline limité à ce service).
   # Aucun secret, aucune variable : le navigateur appelle l'API sur la même
   # origine (routeur alivaon-admin-api ci-dessus). Pas de réseau `internal` :
   # le conteneur n'a pas à joindre Symfony ni la base.
