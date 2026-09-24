@@ -1,11 +1,12 @@
 # Front Next.js — intégration au VPS
 
 Le site public et le back-office passent de Symfony/Twig/EasyAdmin à Next.js
-(dépôt `alivaon-next`). Symfony reste le backend (API). Ce document décrit le
+(dépôts `alivaon-site` et `alivaon-admin`, issus de `alivaon-next` séparé le
+24/09/2026). Symfony reste le backend (API). Ce document décrit le
 routage Traefik et la mise en service, **staging d'abord**.
 
 Règle absolue : le site public ne remplace Symfony sur `www` qu'après un
-contrôle de parité SEO sans écart (`alivaon-next/docs/seo-parity.md`).
+contrôle de parité SEO sans écart (`alivaon-site/docs/seo-parity.md`).
 
 ## Services
 
@@ -31,7 +32,14 @@ réseau interne ; production à la bascule : `production-api` et
 Chaque dépôt ne tire et ne relance **que ses services** :
 - `alivaon-symfony` → `docker compose pull app` / `up -d app` (branche
   `ci/deploy-scoped-services`, prérequis) ;
-- `alivaon-next` → `docker compose pull web admin` / `up -d --no-deps web admin`.
+- `alivaon-site` → `docker compose pull web` / `up -d --no-deps web` (staging
+  seulement jusqu'à la bascule) ;
+- `alivaon-admin` → `docker compose pull admin` / `up -d --no-deps admin`.
+
+Noms d'images inchangés depuis `alivaon-next` (`alivaon-next-site`,
+`alivaon-next-admin`) : le paquet GHCR `alivaon-next-site` doit donner l'accès
+en écriture au dépôt `alivaon-site` (réglages du paquet, « Manage Actions
+access »).
 
 Un `pull` global échouerait : le `GITHUB_TOKEN` d'un dépôt ne lit pas les images
 de l'autre.
@@ -124,6 +132,10 @@ automatiquement au premier accès (défi HTTP).
 
 ### 3. Dépôt GitHub `alivaon/alivaon-next`
 
+> Historique : ce dépôt a été renommé `alivaon-admin` le 24/09/2026 et le site
+> extrait dans `alivaon-site` (clé de déploiement et secrets propres, voir le
+> journal).
+
 Mac (dans `alivaon-next`) :
 ```bash
 gh repo create alivaon/alivaon-next --private --source . --push
@@ -184,8 +196,9 @@ scp staging/docker-compose.yml alivaon:/opt/alivaon/staging/docker-compose.yml
 
 ### 6. Premier déploiement du front
 
-Un push sur une branche d'alivaon-next (autre que `main`) publie les images et
-démarre `web` et `admin` sur le staging (workflow `Deploy`).
+Un push sur une branche d'alivaon-site (`main` comprise) publie l'image du site
+et redémarre `web` sur le staging ; un push sur une branche d'alivaon-admin
+autre que `main` fait de même pour `admin` (workflow `Deploy` de chaque dépôt).
 
 ### 7. Contrôles
 
@@ -218,7 +231,7 @@ Symfony qu'une fois :
 2. Fusion de l'API dans `main` d'alivaon-symfony : le pipeline recrée `app`
    (nouvelle image et nouveaux routeurs d'un coup). Base non recréée : le
    `.env` de production n'est pas modifié.
-3. Push sur `main` d'alivaon-next : image `alivaon-next-admin:production`,
+3. Push sur `main` d'alivaon-admin : image `alivaon-next-admin:production`,
    déploiement du seul service `admin`.
 4. Contrôles : parité SEO de `www` contre la référence de production
    (`pnpm seo:snapshot --origin https://www.alivaon.com --seeds-from
@@ -249,6 +262,44 @@ Ou, pour un retour durable, `git revert -m 1 <merge de la PR #140>` sur `main`.
 Routage : restaurer `docker-compose.yml.bak-20260924-143902` (production)
 puis `docker compose up -d --no-deps app`, et remettre le dépôt en accord
 (revert des PR #3 et #4).
+
+## Copie de la production vers le staging (anonymisée)
+
+Pour le dernier contrôle de parité avant la bascule : le staging reçoit le
+contenu de la production (base + fichiers publics), données personnelles
+anonymisées. Autorisée par le propriétaire le 24/09/2026.
+
+Mac :
+```bash
+./scripts/diff-vps.sh
+ssh alivaon 'bash -s' < scripts/staging-copie-prod.sh
+./scripts/diff-vps.sh
+```
+
+Ce que fait `scripts/staging-copie-prod.sh` (sur le VPS) :
+
+1. sauvegarde la base et les uploads du staging dans
+   `/opt/alivaon/backups/staging-<horodatage>/` ;
+2. arrête `app` et `web` du staging (pas `db`) ;
+3. copie la base de production **sans** `user` (le staging garde ses comptes)
+   ni `messenger_messages` ; production en lecture seule
+   (`mysqldump --single-transaction`) ;
+4. anonymise `candidate_application`, `contact_message` et `comment`
+   (adresses `@staging.invalid`, téléphones, IP, CV et textes libres) et
+   vérifie qu'il ne reste aucune ligne en clair — sinon vide ces tables et
+   s'arrête ;
+5. remplace les uploads du staging par ceux de la production (volume monté en
+   lecture seule) ; `cv_private` n'est jamais copié ;
+6. redémarre `app`, recrée `web` (cache de Next vidé) et affiche un bilan.
+
+Restauration du staging d'avant la copie (VPS) :
+```bash
+cd /opt/alivaon/staging && docker compose stop web app
+B=/opt/alivaon/backups/staging-<horodatage>
+gunzip -c $B/staging-db.sql.gz | docker exec -i staging-db-1 sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -u root "$MYSQL_DATABASE"'
+docker run --rm --user 0:0 -v staging_uploads_staging:/dst -v $B:/src:ro --entrypoint sh ghcr.io/alivaon/alivaon-symfony:staging -c 'find /dst -mindepth 1 -delete && tar -C /dst -xzf /src/staging-uploads.tar.gz'
+docker compose start app && docker compose up -d --force-recreate --no-deps web
+```
 
 ## Journal des actions sur le serveur
 
@@ -281,6 +332,12 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 19:48 | PR #6 et #7 fusionnées ; `diff-vps.sh` : 1 écart attendu (compose staging) ; compose copié, `docker compose config` valide, `docker compose up -d --no-deps app web` (base non recréée) ; `diff-vps.sh` après : identique. Contrôles : `staging-api` et `staging-site` résolus vers une seule adresse (réseau interne du staging), API vue de `web` = données du staging (5/5), régénération joignable (401 sans secret), cache de Next vidé par la recréation | `staging/docker-compose.yml.bak-20260924-194856` |
 | 24/09/2026 19:48 | Production, par les pipelines après fusion par le propriétaire : alivaon-symfony PR #141 (commentaire vide → 422) → `app` recréé ; alivaon-next PR #1 → `admin` redéployé. Contrôles : `www` 200, apex → 301, `/api…` sur www → 404, `admin.alivaon.com` → 301 `www`, `/api/auth/me` et `/api/admin/…` → 401 sans session | — |
 | 24/09/2026 20:05 | Parité SEO du staging (Next `www.preview.staging` contre Symfony `www.staging`, mêmes données) : plus aucun écart de contenu ; restent `/admin*`, `/login`, `/logout` (routage de la bascule), `x-robots-tag` du middleware noindex du staging sur `/index.php` et `/adminer.php` (404 des deux côtés) et `?page=0` (exception validée). Production contre `prod-2026-09-24` : seuls écarts = blancs du texte extrait (« 30 + » → « 30+ »), dus à l'extracteur modifié après la capture de la référence ; titres, metas, canonicals, liens, images, JSON-LD, statuts et sitemap identiques | — |
+| 24/09/2026 22:44 | Séparation d'alivaon-next : dépôt `alivaon-site` créé (historique du site extrait), clé SSH dédiée (ED25519, `SHA256:gfm1xkOA87DQmaoHvvN4tlM0tYqEomUIlQ9BiqfGEt4`) ajoutée à `~alivaondev/.ssh/authorized_keys`, clé privée uniquement dans le secret `VPS_SSH_KEY` d'alivaon-site (supprimée du poste). Révocation : retirer la ligne « github-actions alivaon-site ». `diff-vps.sh` avant et après : identique | `authorized_keys.bak-20260924-224434` |
+| 24/09/2026 22:45 | GitHub : `alivaon-next` renommé `alivaon-admin` (sa clé « github-actions alivaon-next » reste celle du back-office) | — |
+| 24/09/2026 22:46 | Copie anonymisée prod → staging, 1er passage : anonymisation correcte mais contrôle mal lu (en-tête MySQL multiligne) → filet de sécurité : tables personnelles du staging vidées, `app` et `web` laissés arrêtés. Aucune donnée en clair exposée. Script corrigé (`mysql -N`) | `/opt/alivaon/backups/staging-20260924-204644/` (**staging d'avant la copie**, horodatage du serveur en UTC) |
+| 24/09/2026 22:47 | Copie anonymisée, 2e passage : base de production sans `user` ni `messenger_messages` (production en lecture seule), 174 candidatures et 14 messages anonymisés (contrôle : 0 ligne en clair, échantillon vérifié), uploads 66 fichiers / 11 292 Ko identiques à la production, `cv_private` non copié ; `app` et `web` healthy, base non recréée, migrations 22/22 ; `diff-vps.sh` : identique | `/opt/alivaon/backups/staging-20260924-204751/` (état intermédiaire) |
+| 24/09/2026 22:52 | Staging : `cache:pool:clear cache.app` (sitemap mis en cache avec l'hôte de la première requête, commun aux deux hôtes du staging) | — |
+| 24/09/2026 23:10 | Contrôle final (données de production) : Next contre Symfony du staging = 11 écarts connus, aucun de contenu ; contre la production = mêmes 11 + noindex/`robots.txt` du staging ; Lighthouse sans régression. Nouvelle référence `prod-2026-09-24b` (alivaon-site PR #1) | — |
 
 ### Enseignements pour la production
 
