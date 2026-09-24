@@ -166,6 +166,19 @@ Symfony d'avant la phase 6 (« Phase 6 — nettoyage » ci-dessous), puis
   (`ADMIN_URL`).
 - **Staging** : `www.staging` servi par Next.js comme la production ; anciens
   hôtes de prévisualisation redirigés.
+- **Filet de sécurité** : si `web` est indisponible, Traefik retombe sur
+  Symfony, qui répond **503 + `Retry-After: 60`** sur les pages du site
+  (panne passagère pour les moteurs, jamais 404).
+- **Déploiements du site sans coupure** (workflow d'alivaon-site) : le nouveau
+  `web` démarre à côté de l'ancien, reçoit le trafic une fois healthy
+  (middleware `retry` sur le routeur), puis l'ancien est retiré. Mesuré en
+  production : 1 connexion perdue sur 191 à l'arrêt de l'ancien conteneur
+  (au lieu de ~3 s de 503). Amélioration possible : drainer l'ancien par un
+  contrôle de santé Traefik avant son arrêt.
+- **Changer les labels de `web`** : toujours par une recréation simple
+  (`docker compose up -d --no-deps web`, ~3 s de 503), jamais pendant un
+  remplacement à deux conteneurs (définitions divergentes : Traefik désactive
+  le routeur).
 - **Retour au site Twig** (dernier recours) : redéployer l'image Symfony
   d'avant la phase 6 — relancer le run `Deploy` de `main` d'alivaon-symfony
   sur le commit `a894ecc` (PR #141) — puis `docker compose stop web` en
@@ -423,6 +436,15 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 25/09/2026 00:30 | Contrôles immédiats : pages servies par Next.js ; 69 ressources de l'accueil en 200 (thème, uploads, `_next`) ; apex, `http`, slash final → 301 ; `//blog` 200 ; sitemap, robots, llms servis par Symfony ; `/api/public` 200, reste de `/api` 404 ; `/admin*`, `/login`, `/logout` → 301 `www.admin.alivaon.com` ; GA présent | — |
 | 25/09/2026 00:40 | **Parité de `www` contre `prod-2026-09-24b` : 0 écart bloquant** (74 pages, 117 sondes, 47 entrées de sitemap ; 9 exceptions validées : ancien EasyAdmin, `?page=0`) ; formulaires contact, commentaire, candidature → 422 sur envoi vide (rien créé) ; régénération signée `app` → `web` : 200 | — |
 | 25/09/2026 00:55 | Lighthouse (18 gabarits) : aucune régression. `/en` : LCP ≈ 19 s identique sous Symfony (staging, données de production : 18,4 s) et Next (19,0 / 19,4 s) mesurés au même moment — la mesure Symfony de 22:xx (8,1 s) relevait de la variance | — |
+| 25/09/2026 01:03 | Phase 6, staging : alivaon-infra PR #15 fusionnée ; compose copié, `app` et `web` recréés (base non recréée) ; `www.staging` servi par Next.js, anciens hôtes preview → 301, ancien EasyAdmin → admin du staging ; `diff-vps.sh` : identique | `staging/docker-compose.yml.bak-20260925-010334` |
+| 25/09/2026 01:10 | alivaon-symfony branche `chore/phase6-api-seule` → staging (Symfony réduit à l'API) ; parité de `www.staging` (données de production) contre `prod-2026-09-24b` : aucun écart hors noindex/robots du staging | — |
+| 25/09/2026 01:13 | **Phase 6 en production** : alivaon-symfony PR #142 fusionnée → `app` recréé (6e6ef29, sans Twig ni EasyAdmin, `ADMIN_URL` = www.admin.alivaon.com) ; contrôles : routage, formulaires (422), régénération (200), invitation (410), **parité de `www` : 0 écart bloquant** ; `diff-vps.sh` : identique | — |
+| 25/09/2026 01:35 | Staging : alivaon-infra PR #16 (retry sur le routeur du site), `web` recréé ; essais de remplacement à deux conteneurs sous sonde (0,1–0,2 s) : 0 à 1 requête perdue sur ~130 | `staging/docker-compose.yml.bak-20260925-013502` |
+| 25/09/2026 01:40 | Staging : `web` arrêté volontairement → pages en 503 `Retry-After: 60` (alivaon-symfony PR #143 déployée sur le staging), sitemap servi ; `web` redémarré | — |
+| 25/09/2026 01:45 | Production : alivaon-symfony PR #143 fusionnée → `app` recréé (074ce24, pages du site en 503 si `web` indisponible) | — |
+| 25/09/2026 01:46 | Production : alivaon-infra PR #17 (retry), `web` recréé simplement : 8 réponses 503 en ~3 s (sonde), aucune 404 ; `diff-vps.sh` : identique | `production/docker-compose.yml.bak-20260925-014613` |
+| 25/09/2026 01:48 | alivaon-site PR #3 (docs) : déploiement encore par recréation (script sans coupure non inclus par erreur) : 10 réponses 503 en ~3 s | — |
+| 25/09/2026 01:52 | alivaon-site PR #4 : **premier déploiement sans coupure** (`web-2` démarré, `web-1` retiré) : 190/191 requêtes 200, 1 connexion perdue à l'arrêt de l'ancien | — |
 
 ### Enseignements pour la production
 
