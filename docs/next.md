@@ -59,18 +59,21 @@ Symfony ne coupe pas la redirection).
 
 ## Routage staging
 
-Tous les hôtes sont derrière la BasicAuth du staging.
+Même routage que la production depuis la phase 6 (25/09/2026), tous les hôtes
+derrière la BasicAuth du staging et `X-Robots-Tag: noindex, nofollow`.
 
 | Hôte | Chemins | Service | Priorité |
 |---|---|---|---|
-| `www.staging.alivaon.com` | tout | `app` (Symfony, inchangé) | — |
+| `www.staging.alivaon.com` | `/admin*`, `/login`, `/logout` | 301 vers `www.admin.staging.alivaon.com` | 120 |
+| `www.staging.alivaon.com` | `/api/public` | `app` | 110 |
+| `www.staging.alivaon.com` | `/uploads/`, thème, sitemap, robots, llms, favicon, ping, `/invitation` | `app` | 90 |
+| `www.staging.alivaon.com` | tout le reste | `web` | 80 |
 | `www.admin.staging.alivaon.com` | `/api/admin`, `/api/auth`, `/uploads/` | `app` | 100 |
 | `www.admin.staging.alivaon.com` | tout le reste | `admin` | 10 |
-| `www.preview.staging.alivaon.com` | `/api/public`, `/uploads/`, `/sitemap.xml`, `/robots.txt`, `/llms.txt` | `app` | 100 |
-| `www.preview.staging.alivaon.com` | tout le reste | `web` | 10 |
+| `(www.)preview.staging.alivaon.com` | tout | 301 vers `www.staging` (anciens hôtes) | 10 |
 
-Les hôtes admin et preview renvoient aussi `X-Robots-Tag: noindex, nofollow`.
-`/api/admin` n'est jamais routé sur `preview` ni sur `www.staging`.
+Le routeur historique `alivaon-staging` (Symfony, priorité implicite 63) ne
+sert plus que de repli. Symfony du staging : `ADMIN_URL` posé dans le compose.
 
 ## Routage de production
 
@@ -147,10 +150,26 @@ Symfony. `db` n'est pas recréée (`.env` inchangé, `--no-deps`).
    Analytics présent, régénération après une modification dans l'admin,
    Lighthouse.
 
-**Retour arrière (secondes)** : `docker compose stop web` — ses routeurs
-disparaissent, `www` revient au site Symfony (inchangé, même base). Puis
-restaurer le compose sauvegardé et `docker compose up -d --no-deps web`
-(non routé) pour que le serveur corresponde de nouveau au dépôt.
+**Retour arrière** : jusqu'à la phase 6, `docker compose stop web` rendait
+`www` au site Symfony en quelques secondes. **Depuis la phase 6, Symfony n'a
+plus de pages** : le retour au site Twig demande de redéployer l'image
+Symfony d'avant la phase 6 (« Phase 6 — nettoyage » ci-dessous), puis
+`docker compose stop web`.
+
+## Phase 6 — nettoyage (25/09/2026)
+
+- **Symfony** (alivaon-symfony) : site Twig et EasyAdmin retirés. Symfony sert
+  l'API, le sitemap, robots.txt, les fichiers et l'acceptation des
+  invitations. Les routes du site restent déclarées à l'identique
+  (`FrontRoutesController`, 404) : sitemap, URLs de l'API et emails en
+  dépendent. Liens des emails et fin d'invitation vers le back-office Next.js
+  (`ADMIN_URL`).
+- **Staging** : `www.staging` servi par Next.js comme la production ; anciens
+  hôtes de prévisualisation redirigés.
+- **Retour au site Twig** (dernier recours) : redéployer l'image Symfony
+  d'avant la phase 6 — relancer le run `Deploy` de `main` d'alivaon-symfony
+  sur le commit `a894ecc` (PR #141) — puis `docker compose stop web` en
+  production.
 
 ## Mise en service du staging — runbook
 
