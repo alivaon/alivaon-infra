@@ -266,6 +266,8 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 14:50 | Contrôles production : `www` 200, apex → 301, `/api…` sur www et apex → 404 (comme avant), EasyAdmin inchangé, `www.admin.alivaon.com/api/…` → 401 sans session. **Parité SEO contre `prod-2026-09-24` : 0 écart** (74 pages, 117 sondes, 47 entrées de sitemap) | — |
 | 24/09/2026 14:53 | alivaon-next `main` → image `alivaon-next-admin:production`, service `admin` créé en production, healthy | — |
 | 24/09/2026 14:55 | Contrôles admin : `admin.alivaon.com` → 301 `www.admin.alivaon.com`, TLS valide, `X-Robots-Tag: noindex, nofollow`, `robots.txt` Disallow, `/uploads/` servi par Symfony, connexion refusée proprement (401) ; `diff-vps.sh` : identique | — |
+| 24/09/2026 18:47 | PR #5 (routage du site Next.js sur `www.preview.staging`) fusionnée ; `diff-vps.sh` : 1 écart attendu (compose staging) ; compose staging copié, `docker compose config` valide, `docker compose up -d --no-deps app web` ; `diff-vps.sh` après : identique. Production non touchée | `staging/docker-compose.yml.bak-20260924-184757` |
+| 24/09/2026 19:20 | Déploiement staging d'alivaon-next `feat/site-pages` (run 36031234229) : `web` et `admin` recréés, healthy. Contrôles : pages FR/EN en 200 depuis `web` (titre et canonique attendus), 404 sur article inconnu, `/sitemap.xml` servi par Symfony, `www.preview.staging` → 401, `preview.staging` → 301 `www` (chemin conservé) ; `diff-vps.sh` : identique | — |
 
 ### Enseignements pour la production
 
