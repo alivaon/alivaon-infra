@@ -27,11 +27,15 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 # Client MySQL dans un conteneur de base, identifiants lus DANS le conteneur
 # (jamais affichés ni passés en argument sur l'hôte).
 mysql_in()     { docker exec -i "$1" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -u root "$MYSQL_DATABASE"'; }
+# Valeur seule, sans en-tête (-N) : MySQL prend sinon l'expression pour titre.
+mysql_value()  { docker exec -i "$1" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -N -B -u root "$MYSQL_DATABASE"'; }
 mysqldump_in() { docker exec "$1" sh -c "MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" exec mysqldump -u root --single-transaction --no-tablespaces --routines --triggers $2 \"\$MYSQL_DATABASE\""; }
 
-for c in production-db-1 staging-db-1 staging-app-1; do
+for c in production-db-1 staging-db-1; do
   docker inspect -f '{{.State.Running}}' "$c" | grep -q true || { echo "ERREUR : $c ne tourne pas"; exit 1; }
 done
+# app peut être arrêté (reprise après un échec) : il doit seulement exister.
+docker inspect staging-app-1 >/dev/null || { echo "ERREUR : staging-app-1 introuvable"; exit 1; }
 for c in production-db-1 staging-db-1; do
   docker exec "$c" sh -c 'test -n "$MYSQL_DATABASE" && test -n "$MYSQL_ROOT_PASSWORD"' || { echo "ERREUR : variables MySQL absentes dans $c"; exit 1; }
 done
@@ -82,7 +86,7 @@ UPDATE comment SET
 SQL
 
 log "5. Contrôle de l'anonymisation"
-LEFT="$(mysql_in staging-db-1 <<'SQL' | tail -n +2
+LEFT="$(mysql_value staging-db-1 <<'SQL'
 SELECT (SELECT COUNT(*) FROM candidate_application WHERE email NOT LIKE '%@staging.invalid' OR phone IS NOT NULL OR cv_file_name IS NOT NULL)
      + (SELECT COUNT(*) FROM contact_message WHERE email NOT LIKE '%@staging.invalid' OR phone IS NOT NULL OR ip_address IS NOT NULL)
      + (SELECT COUNT(*) FROM comment WHERE author_email NOT LIKE '%@staging.invalid' OR ip_address IS NOT NULL);
