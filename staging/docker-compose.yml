@@ -51,9 +51,12 @@ services:
       - "traefik.http.routers.alivaon-staging-admin-api.tls.certresolver=letsencrypt"
       - "traefik.http.routers.alivaon-staging-admin-api.middlewares=staging-auth,staging-noindex"
       - "traefik.http.routers.alivaon-staging-admin-api.service=alivaon-staging"
-      # www.preview.staging : API publique, images et fichiers SEO servis par Symfony
-      # (sitemap et robots inchangés — robots en Disallow: / car APP_STAGING=1).
-      - "traefik.http.routers.alivaon-staging-preview-api.rule=Host(`www.preview.staging.alivaon.com`) && (PathPrefix(`/api/public`) || PathPrefix(`/uploads/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`))"
+      # www.preview.staging : ce que Symfony continue de servir derrière le site
+      # Next.js (même liste que la cible de production, docs/next.md) : API
+      # publique, images, fichiers du thème (/build, /vandor, /bundles, /assets),
+      # sitemap, robots (Disallow: / car APP_STAGING=1), llms.txt, favicon.ico,
+      # contrôle de santé, page d'invitation.
+      - "traefik.http.routers.alivaon-staging-preview-api.rule=Host(`www.preview.staging.alivaon.com`) && (PathPrefix(`/api/public`) || PathPrefix(`/uploads/`) || PathPrefix(`/build/`) || PathPrefix(`/vandor/`) || PathPrefix(`/bundles/`) || PathPrefix(`/assets/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`) || Path(`/favicon.ico`) || Path(`/ping`) || Path(`/invitation`) || PathPrefix(`/invitation/`))"
       - "traefik.http.routers.alivaon-staging-preview-api.priority=100"
       - "traefik.http.routers.alivaon-staging-preview-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-preview-api.tls.certresolver=letsencrypt"
@@ -90,7 +93,11 @@ services:
       - "traefik.http.routers.alivaon-staging-preview.priority=10"
       - "traefik.http.routers.alivaon-staging-preview.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-preview.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-preview.middlewares=staging-auth,staging-noindex"
+      - "traefik.http.routers.alivaon-staging-preview.middlewares=staging-auth,staging-noindex,staging-preview-slashes"
+      # « //blog » : Symfony sert la page (200) ; Next redirigerait en 308.
+      # Barres obliques répétées ramenées à une seule avant d'atteindre Next.
+      - "traefik.http.middlewares.staging-preview-slashes.replacepathregex.regex=^/{2,}(.*)"
+      - "traefik.http.middlewares.staging-preview-slashes.replacepathregex.replacement=/$${1}"
       - "traefik.http.routers.alivaon-staging-preview.service=alivaon-staging-web"
       - "traefik.http.services.alivaon-staging-web.loadbalancer.server.port=3000"
       # preview.staging -> www.preview.staging (301, canonique = www).
