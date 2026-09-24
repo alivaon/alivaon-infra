@@ -187,4 +187,16 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 24/09/2026 10:19 | `diff-vps.sh` depuis `main` : serveur identique au dépôt | — |
 | 24/09/2026 10:19 | Clé SSH dédiée au déploiement d'alivaon-next (ED25519, `SHA256:AOqe0EdM7bnKoHIy8zidQb4O/qZA504oyMwm27Jwovk`) ajoutée à `~alivaondev/.ssh/authorized_keys` ; clé privée uniquement dans le secret `VPS_SSH_KEY` du dépôt (supprimée du poste). Révocation : retirer la ligne « github-actions alivaon-next » | `authorized_keys.bak-20260924-101919` |
 | 24/09/2026 10:20 | `NEXT_REVALIDATE_URL` et `NEXT_REVALIDATE_SECRET` (64 caractères) ajoutés à `/opt/alivaon/staging/.env` | `.env.bak-20260924-102008` |
+| 24/09/2026 10:51 | DNS `admin.staging` et `preview.staging` → 178.104.185.156 vérifié sur ns1 et ns2 d'o2switch | — |
+| 24/09/2026 10:51 | `diff-vps.sh` : identique ; PR #1 fusionnée ; `staging/docker-compose.yml` copié ; `diff-vps.sh` après : identique | `docker-compose.yml.bak-20260924-105146` |
+| 24/09/2026 10:52 | Premier déploiement du front (branche `deploy/staging` d'alivaon-next) : `web` et `admin` créés, healthy | — |
+| 24/09/2026 10:54 | `docker compose up -d app` : app recréé (nouveaux routeurs, variables de régénération). **db recréée aussi** (son `.env` a changé) : coupure de quelques secondes, données intactes (volume) | — |
+| 24/09/2026 10:54 | Certificats Let's Encrypt obtenus pour `admin.staging` et `preview.staging` (1re tentative sur `preview` refusée : un validateur voyait encore l'ancienne IP ; 2e réussie) | — |
+| 24/09/2026 10:55 | Contrôles : 401 + TLS valide sur les 3 hôtes ; web → API interne avec hôte public ; app → régénération 200, sans secret 401 ; production inchangée | — |
+
+### Enseignements pour la production
+
+- **Modifier le `.env` d'une stack recrée aussi `db`** au prochain `docker compose up -d app` (y compris par le pipeline Symfony) : prévoir l'ajout des variables Next en production à un moment calme, ou ajouter le service `db` à `env_file` séparé.
+- Les middlewares `staging-auth` et `staging-noindex` sont déclarés dans les labels du conteneur `app` : pendant un redémarrage d'`app`, les routeurs de `web` et `admin` qui les référencent sont désactivés (404, jamais d'exposition). Pour la production, déclarer ces middlewares dans la configuration dynamique de Traefik (fichier) plutôt que sur un conteneur.
+- Côté DNS o2switch : créer les enregistrements dans l'**Éditeur de zone**, jamais via « Sous-domaines » (qui pointe vers l'hébergement o2switch).
 
