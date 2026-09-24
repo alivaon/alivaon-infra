@@ -10,13 +10,20 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Prime sur la valeur du .env (modifier le .env recréerait aussi db).
+      NEXT_REVALIDATE_URL: http://staging-site:3000/api/revalidate
     volumes:
       - uploads_staging:/var/www/html/public/uploads
       # CV des candidats — HORS docroot, jamais servis par nginx.
       - cv_private_staging:/var/www/html/var/private
     networks:
-      - traefik_proxy
-      - internal
+      traefik_proxy: {}
+      # Alias propre à la pile : sur traefik_proxy, « app » désigne aussi le
+      # Symfony de production (le DNS Docker renvoie les deux adresses).
+      internal:
+        aliases:
+          - staging-api
     depends_on:
       db:
         condition: service_healthy
@@ -80,12 +87,15 @@ services:
     # Variables explicites (pas d'env_file) : le front ne reçoit ni la base ni
     # les secrets Symfony.
     environment:
-      API_INTERNAL_URL: http://app
+      API_INTERNAL_URL: http://staging-api
       SITE_ORIGIN: https://www.preview.staging.alivaon.com
       NEXT_REVALIDATE_SECRET: ${NEXT_REVALIDATE_SECRET}
     networks:
-      - traefik_proxy
-      - internal
+      traefik_proxy: {}
+      # Même raison que pour app : jamais « web » ni « app » entre services.
+      internal:
+        aliases:
+          - staging-site
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik_proxy"
