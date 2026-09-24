@@ -1,6 +1,6 @@
 # Stack PRODUCTION — déployée dans /opt/alivaon/production/.
-# Domaines : alivaon.com + www.alivaon.com (site Symfony ; site Next.js `web`
-#            démarré mais non routé jusqu'à la bascule, docs/next.md),
+# Domaines : alivaon.com + www.alivaon.com (site Next.js `web` depuis la
+#            bascule ; Symfony garde l'API publique, les fichiers, le sitemap),
 #            www.admin.alivaon.com (back-office Next.js + API d'administration ;
 #            admin.alivaon.com redirige en 301, canonique = www comme le site).
 #
@@ -79,8 +79,10 @@ services:
       start_period: 40s
 
   # Site public Next.js (dépôt alivaon-site, pipeline limité à ce service).
-  # Étape A de la bascule : démarré mais NON ROUTÉ (www reste servi par
-  # Symfony). L'étape B ajoute ses routeurs (docs/next.md, « Bascule du site »).
+  # Tous les routeurs de www sont portés par ce service (docs/next.md,
+  # « Bascule du site ») : ils passent devant le routeur historique `alivaon`
+  # de Symfony (priorité implicite 47 = longueur de sa règle). Arrêter `web`
+  # les retire : www revient aussitôt au site Symfony (retour arrière).
   web:
     image: ghcr.io/alivaon/alivaon-next-site:production
     restart: unless-stopped
@@ -99,7 +101,57 @@ services:
         aliases:
           - production-site
     labels:
-      - "traefik.enable=false"
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik_proxy"
+      # Apex → www (301), déclaré ici : un redémarrage de Symfony ne retire
+      # pas les middlewares du site (enseignement du staging).
+      - "traefik.http.middlewares.alivaon-web-canonical.redirectregex.regex=^https?://alivaon\\.com/(.*)"
+      - "traefik.http.middlewares.alivaon-web-canonical.redirectregex.replacement=https://www.alivaon.com/$${1}"
+      - "traefik.http.middlewares.alivaon-web-canonical.redirectregex.permanent=true"
+      # « //blog » : Symfony servait la page (200) ; Next redirigerait en 308.
+      - "traefik.http.middlewares.alivaon-web-slashes.replacepathregex.regex=^/{2,}(.*)"
+      - "traefik.http.middlewares.alivaon-web-slashes.replacepathregex.replacement=/$${1}"
+      # Ancien EasyAdmin (/admin*, /login, /logout) → nouvel admin, 301
+      # (décision du propriétaire, 24/09/2026).
+      - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.regex=^https?://[^/]+/.*"
+      - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.replacement=https://www.admin.alivaon.com/"
+      - "traefik.http.middlewares.alivaon-web-legacy-admin.redirectregex.permanent=true"
+      # 1) Tout le reste de www → Next.js.
+      - "traefik.http.routers.alivaon-web.rule=Host(`alivaon.com`) || Host(`www.alivaon.com`)"
+      - "traefik.http.routers.alivaon-web.priority=60"
+      - "traefik.http.routers.alivaon-web.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-web.tls=true"
+      - "traefik.http.routers.alivaon-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-web.middlewares=alivaon-web-canonical,alivaon-web-slashes"
+      - "traefik.http.routers.alivaon-web.service=alivaon-web"
+      - "traefik.http.services.alivaon-web.loadbalancer.server.port=3000"
+      # 2) Chemins toujours servis par Symfony (même liste que la préversion
+      #    du staging) : fichiers du thème et uploads, sitemap, robots, llms,
+      #    favicon, ping, invitations des comptes.
+      - "traefik.http.routers.alivaon-web-symfony.rule=(Host(`alivaon.com`) || Host(`www.alivaon.com`)) && (PathPrefix(`/uploads/`) || PathPrefix(`/build/`) || PathPrefix(`/vandor/`) || PathPrefix(`/bundles/`) || PathPrefix(`/assets/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`) || Path(`/favicon.ico`) || Path(`/ping`) || Path(`/invitation`) || PathPrefix(`/invitation/`))"
+      - "traefik.http.routers.alivaon-web-symfony.priority=90"
+      - "traefik.http.routers.alivaon-web-symfony.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-web-symfony.tls=true"
+      - "traefik.http.routers.alivaon-web-symfony.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-web-symfony.middlewares=alivaon-web-canonical"
+      - "traefik.http.routers.alivaon-web-symfony.service=alivaon@docker"
+      # 3) API publique ouverte sur www ; le reste de /api reste masqué par
+      #    alivaon-api-hidden (priorité 100, sur app).
+      - "traefik.http.routers.alivaon-web-api-public.rule=(Host(`alivaon.com`) || Host(`www.alivaon.com`)) && PathPrefix(`/api/public`)"
+      - "traefik.http.routers.alivaon-web-api-public.priority=110"
+      - "traefik.http.routers.alivaon-web-api-public.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-web-api-public.tls=true"
+      - "traefik.http.routers.alivaon-web-api-public.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-web-api-public.middlewares=alivaon-web-canonical"
+      - "traefik.http.routers.alivaon-web-api-public.service=alivaon@docker"
+      # 4) Ancien EasyAdmin → www.admin.alivaon.com.
+      - "traefik.http.routers.alivaon-web-legacy-admin.rule=(Host(`alivaon.com`) || Host(`www.alivaon.com`)) && (Path(`/admin`) || PathPrefix(`/admin/`) || Path(`/login`) || Path(`/logout`))"
+      - "traefik.http.routers.alivaon-web-legacy-admin.priority=120"
+      - "traefik.http.routers.alivaon-web-legacy-admin.entrypoints=websecure"
+      - "traefik.http.routers.alivaon-web-legacy-admin.tls=true"
+      - "traefik.http.routers.alivaon-web-legacy-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-web-legacy-admin.middlewares=alivaon-web-legacy-admin"
+      - "traefik.http.routers.alivaon-web-legacy-admin.service=noop@internal"
 
   # Back-office Next.js (dépôt alivaon-admin, pipeline limité à ce service).
   # Aucun secret, aucune variable : le navigateur appelle l'API sur la même
