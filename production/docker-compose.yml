@@ -45,13 +45,20 @@ services:
       # Redirige alivaon.com -> www.alivaon.com (URL canonique = www).
       # L'ancre ^https?://alivaon\.com/ ne matche que l'apex (pas www., qui
       # commence par "www.") -> pas de boucle de redirection.
-      - "traefik.http.routers.alivaon.middlewares=alivaon-canonical"
+      - "traefik.http.routers.alivaon.middlewares=alivaon-canonical,alivaon-retry"
       - "traefik.http.middlewares.alivaon-canonical.redirectregex.regex=^https?://alivaon\\.com/(.*)"
       - "traefik.http.middlewares.alivaon-canonical.redirectregex.replacement=https://www.alivaon.com/$${1}"
       - "traefik.http.middlewares.alivaon-canonical.redirectregex.permanent=true"
       - "traefik.http.routers.alivaon.service=alivaon"
       # Port interne du conteneur (nginx).
       - "traefik.http.services.alivaon.loadbalancer.server.port=80"
+      # Contrôle de Traefik chaque seconde : un conteneur en drain (déploiement
+      # sans coupure) ou en panne sort du trafic en ~1 s.
+      - "traefik.http.services.alivaon.loadbalancer.healthcheck.path=/ping"
+      - "traefik.http.services.alivaon.loadbalancer.healthcheck.interval=1s"
+      - "traefik.http.services.alivaon.loadbalancer.healthcheck.timeout=1s"
+      # Requête refusée par un conteneur qui s'arrête : rejouée sur l'autre.
+      - "traefik.http.middlewares.alivaon-retry.retry.attempts=3"
       # www : l'API n'est pas exposée (même 404 Symfony qu'avant son arrivée).
       # /api/admin et /api/auth ne sont servis que sur www.admin.alivaon.com ;
       # /api/public ne s'ouvrira sur www qu'à la bascule du site Next.js.
@@ -60,7 +67,7 @@ services:
       - "traefik.http.routers.alivaon-api-hidden.entrypoints=websecure"
       - "traefik.http.routers.alivaon-api-hidden.tls=true"
       - "traefik.http.routers.alivaon-api-hidden.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-api-hidden.middlewares=alivaon-canonical,alivaon-api-hidden"
+      - "traefik.http.routers.alivaon-api-hidden.middlewares=alivaon-canonical,alivaon-api-hidden,alivaon-retry"
       - "traefik.http.routers.alivaon-api-hidden.service=alivaon"
       - "traefik.http.middlewares.alivaon-api-hidden.replacepath.path=/api-non-disponible"
       # www.admin.alivaon.com : API d'administration, authentification et images
@@ -70,6 +77,7 @@ services:
       - "traefik.http.routers.alivaon-admin-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-admin-api.tls=true"
       - "traefik.http.routers.alivaon-admin-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.alivaon-admin-api.middlewares=alivaon-retry"
       - "traefik.http.routers.alivaon-admin-api.service=alivaon"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/ping"]
@@ -131,6 +139,11 @@ services:
       - "traefik.http.routers.alivaon-web.middlewares=alivaon-web-canonical,alivaon-web-slashes,alivaon-web-retry"
       - "traefik.http.routers.alivaon-web.service=alivaon-web"
       - "traefik.http.services.alivaon-web.loadbalancer.server.port=3000"
+      # Contrôle de Traefik chaque seconde : un conteneur en drain (déploiement
+      # sans coupure) ou en panne sort du trafic en ~1 s.
+      - "traefik.http.services.alivaon-web.loadbalancer.healthcheck.path=/api/health"
+      - "traefik.http.services.alivaon-web.loadbalancer.healthcheck.interval=1s"
+      - "traefik.http.services.alivaon-web.loadbalancer.healthcheck.timeout=1s"
       # 2) Chemins toujours servis par Symfony (même liste que la préversion
       #    du staging) : fichiers du thème et uploads, sitemap, robots, llms,
       #    favicon, ping, invitations des comptes.
@@ -139,7 +152,7 @@ services:
       - "traefik.http.routers.alivaon-web-symfony.entrypoints=websecure"
       - "traefik.http.routers.alivaon-web-symfony.tls=true"
       - "traefik.http.routers.alivaon-web-symfony.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-web-symfony.middlewares=alivaon-web-canonical"
+      - "traefik.http.routers.alivaon-web-symfony.middlewares=alivaon-web-canonical,alivaon-web-retry"
       - "traefik.http.routers.alivaon-web-symfony.service=alivaon@docker"
       # 3) API publique ouverte sur www ; le reste de /api reste masqué par
       #    alivaon-api-hidden (priorité 100, sur app).
@@ -148,7 +161,7 @@ services:
       - "traefik.http.routers.alivaon-web-api-public.entrypoints=websecure"
       - "traefik.http.routers.alivaon-web-api-public.tls=true"
       - "traefik.http.routers.alivaon-web-api-public.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-web-api-public.middlewares=alivaon-web-canonical"
+      - "traefik.http.routers.alivaon-web-api-public.middlewares=alivaon-web-canonical,alivaon-web-retry"
       - "traefik.http.routers.alivaon-web-api-public.service=alivaon@docker"
       # 4) Ancien EasyAdmin → www.admin.alivaon.com.
       - "traefik.http.routers.alivaon-web-legacy-admin.rule=(Host(`alivaon.com`) || Host(`www.alivaon.com`)) && (Path(`/admin`) || PathPrefix(`/admin/`) || Path(`/login`) || Path(`/logout`))"
