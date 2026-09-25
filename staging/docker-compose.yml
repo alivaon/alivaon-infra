@@ -40,7 +40,7 @@ services:
       # cohérent avec la prod). L'ancre ^https?://staging\.alivaon\.com/ ne matche
       # pas www.staging (qui commence par "www.") -> pas de boucle.
       # Ordre des middlewares : redirection D'ABORD, puis basic auth.
-      - "traefik.http.routers.alivaon-staging.middlewares=staging-canonical,staging-auth"
+      - "traefik.http.routers.alivaon-staging.middlewares=staging-canonical,staging-auth,staging-retry"
       - "traefik.http.middlewares.staging-canonical.redirectregex.regex=^https?://staging\\.alivaon\\.com/(.*)"
       - "traefik.http.middlewares.staging-canonical.redirectregex.replacement=https://www.staging.alivaon.com/$${1}"
       - "traefik.http.middlewares.staging-canonical.redirectregex.permanent=true"
@@ -48,6 +48,13 @@ services:
       # Le hash est fourni via .env (STAGING_BASICAUTH), voir .env.example.
       - "traefik.http.middlewares.staging-auth.basicauth.users=${STAGING_BASICAUTH}"
       - "traefik.http.services.alivaon-staging.loadbalancer.server.port=80"
+      # Contrôle de Traefik chaque seconde : un conteneur en drain (déploiement
+      # sans coupure) ou en panne sort du trafic en ~1 s.
+      - "traefik.http.services.alivaon-staging.loadbalancer.healthcheck.path=/ping"
+      - "traefik.http.services.alivaon-staging.loadbalancer.healthcheck.interval=1s"
+      - "traefik.http.services.alivaon-staging.loadbalancer.healthcheck.timeout=1s"
+      # Requête refusée par un conteneur qui s'arrête : rejouée sur l'autre.
+      - "traefik.http.middlewares.staging-retry.retry.attempts=3"
       # ── Site et back-office Next.js (docs/next.md) ───────────────────────
       # Le routeur alivaon-staging ci-dessus ne sert plus que de repli : les
       # routeurs de www.staging sont portés par `web`. Symfony sert l'API
@@ -57,7 +64,7 @@ services:
       - "traefik.http.routers.alivaon-staging-admin-api.priority=100"
       - "traefik.http.routers.alivaon-staging-admin-api.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-admin-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-admin-api.middlewares=staging-auth,staging-noindex"
+      - "traefik.http.routers.alivaon-staging-admin-api.middlewares=staging-auth,staging-noindex,staging-retry"
       - "traefik.http.routers.alivaon-staging-admin-api.service=alivaon-staging"
       # En-tête noindex (hôtes de travail et back-office).
       - "traefik.http.middlewares.staging-noindex.headers.customresponseheaders.X-Robots-Tag=noindex, nofollow"
@@ -114,19 +121,24 @@ services:
       - "traefik.http.routers.alivaon-staging-web.middlewares=staging-web-canonical,staging-web-auth,staging-web-noindex,staging-web-slashes,staging-web-retry"
       - "traefik.http.routers.alivaon-staging-web.service=alivaon-staging-web"
       - "traefik.http.services.alivaon-staging-web.loadbalancer.server.port=3000"
+      # Contrôle de Traefik chaque seconde : un conteneur en drain (déploiement
+      # sans coupure) ou en panne sort du trafic en ~1 s.
+      - "traefik.http.services.alivaon-staging-web.loadbalancer.healthcheck.path=/api/health"
+      - "traefik.http.services.alivaon-staging-web.loadbalancer.healthcheck.interval=1s"
+      - "traefik.http.services.alivaon-staging-web.loadbalancer.healthcheck.timeout=1s"
       # 2) Chemins toujours servis par Symfony (même liste que la production).
       - "traefik.http.routers.alivaon-staging-web-symfony.rule=(Host(`staging.alivaon.com`) || Host(`www.staging.alivaon.com`)) && (PathPrefix(`/uploads/`) || PathPrefix(`/build/`) || PathPrefix(`/vandor/`) || PathPrefix(`/bundles/`) || PathPrefix(`/assets/`) || Path(`/sitemap.xml`) || Path(`/robots.txt`) || Path(`/llms.txt`) || Path(`/favicon.ico`) || Path(`/ping`) || Path(`/invitation`) || PathPrefix(`/invitation/`))"
       - "traefik.http.routers.alivaon-staging-web-symfony.priority=90"
       - "traefik.http.routers.alivaon-staging-web-symfony.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-web-symfony.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-web-symfony.middlewares=staging-web-canonical,staging-web-auth"
+      - "traefik.http.routers.alivaon-staging-web-symfony.middlewares=staging-web-canonical,staging-web-auth,staging-web-retry"
       - "traefik.http.routers.alivaon-staging-web-symfony.service=alivaon-staging@docker"
       # 3) API publique.
       - "traefik.http.routers.alivaon-staging-web-api-public.rule=(Host(`staging.alivaon.com`) || Host(`www.staging.alivaon.com`)) && PathPrefix(`/api/public`)"
       - "traefik.http.routers.alivaon-staging-web-api-public.priority=110"
       - "traefik.http.routers.alivaon-staging-web-api-public.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-web-api-public.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-web-api-public.middlewares=staging-web-canonical,staging-web-auth"
+      - "traefik.http.routers.alivaon-staging-web-api-public.middlewares=staging-web-canonical,staging-web-auth,staging-web-retry"
       - "traefik.http.routers.alivaon-staging-web-api-public.service=alivaon-staging@docker"
       # 4) Ancien EasyAdmin → back-office du staging.
       - "traefik.http.routers.alivaon-staging-web-legacy-admin.rule=(Host(`staging.alivaon.com`) || Host(`www.staging.alivaon.com`)) && (Path(`/admin`) || PathPrefix(`/admin/`) || Path(`/login`) || Path(`/logout`))"
