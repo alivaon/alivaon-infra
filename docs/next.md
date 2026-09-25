@@ -170,7 +170,7 @@ Symfony d'avant la phase 6 (« Phase 6 — nettoyage » ci-dessous), puis
   Symfony, qui répond **503 + `Retry-After: 60`** sur les pages du site
   (panne passagère pour les moteurs, jamais 404).
 - **Déploiements sans coupure** (site : workflow d'alivaon-site ; Symfony :
-  workflow d'alivaon-symfony) : le nouveau conteneur démarre à côté de
+  workflow d'alivaon-symfony ; back-office : workflow d'alivaon-admin) : le nouveau conteneur démarre à côté de
   l'ancien ; pour Symfony, les migrations sont jouées sur le nouveau avant la
   bascule (échec : le nouveau est supprimé, l'ancien reste). Puis l'ancien
   est mis en **drain** (`/tmp/alivaon-drain` : sa sonde — `/api/health` pour
@@ -185,8 +185,8 @@ Symfony d'avant la phase 6 (« Phase 6 — nettoyage » ci-dessous), puis
   quelques secondes (404 de Traefik) et le nouveau `web`, cache vide, répond
   500 tant que l'API n'est pas prête (incident du 25/09 00:09). Recréer
   `app`, attendre qu'il soit healthy, puis `web` (~3 s de 503).
-- Back-office (`admin`) : encore redéployé par recréation (quelques secondes
-  d'indisponibilité de l'interface, sans enjeu de référencement).
+- Back-office (`admin`) : même déploiement sans coupure (workflow
+  d'alivaon-admin, drain par `/api/health`) depuis le 25/09.
 - **Retour au site Twig** (dernier recours) : redéployer l'image Symfony
   d'avant la phase 6 — relancer le run `Deploy` de `main` d'alivaon-symfony
   sur le commit `a894ecc` (PR #141) — puis `docker compose stop web` en
@@ -458,6 +458,9 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 25/09/2026 02:17 | alivaon-symfony PR #144 (drain nginx, workflow sans coupure) → premier déploiement sans coupure de Symfony : 1 111/1 111 requêtes 200 (pages, API, thème, sitemap) | — |
 | 25/09/2026 02:19 | alivaon-site PR #5 (drain) → déploiement du site : 531/531 requêtes 200 | — |
 | 25/09/2026 02:21–02:26 | Seconds déploiements (relances) de Symfony puis du site, sondes à 0,1 s : 131/131 et 102/102 requêtes 200. `diff-vps.sh` : identique | — |
+| 25/09/2026 02:36 | alivaon-infra PR #21 (contrôle de santé Traefik et retry pour `admin`) ; `admin` seul recréé sur le staging puis en production, healthy ; `diff-vps.sh` : identique | `staging/` et `production/docker-compose.yml.bak-20260925-023632` |
+| 25/09/2026 02:40 | alivaon-admin : drain (`/api/health`) et workflow sans coupure ; staging : 1 requête perdue au premier déploiement (ancien sans drain), 129/129 au second | — |
+| 25/09/2026 02:45 | alivaon-admin PR #3 fusionnée → production : 516/516 requêtes 200 (page de connexion, sonde 0,1 s), puis relance : 129/129 | — |
 
 ### Enseignements pour la production
 
