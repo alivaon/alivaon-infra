@@ -169,16 +169,24 @@ Symfony d'avant la phase 6 (« Phase 6 — nettoyage » ci-dessous), puis
 - **Filet de sécurité** : si `web` est indisponible, Traefik retombe sur
   Symfony, qui répond **503 + `Retry-After: 60`** sur les pages du site
   (panne passagère pour les moteurs, jamais 404).
-- **Déploiements du site sans coupure** (workflow d'alivaon-site) : le nouveau
-  `web` démarre à côté de l'ancien, reçoit le trafic une fois healthy
-  (middleware `retry` sur le routeur), puis l'ancien est retiré. Mesuré en
-  production : 1 connexion perdue sur 191 à l'arrêt de l'ancien conteneur
-  (au lieu de ~3 s de 503). Amélioration possible : drainer l'ancien par un
-  contrôle de santé Traefik avant son arrêt.
-- **Changer les labels de `web`** : toujours par une recréation simple
-  (`docker compose up -d --no-deps web`, ~3 s de 503), jamais pendant un
-  remplacement à deux conteneurs (définitions divergentes : Traefik désactive
-  le routeur).
+- **Déploiements sans coupure** (site : workflow d'alivaon-site ; Symfony :
+  workflow d'alivaon-symfony) : le nouveau conteneur démarre à côté de
+  l'ancien ; pour Symfony, les migrations sont jouées sur le nouveau avant la
+  bascule (échec : le nouveau est supprimé, l'ancien reste). Puis l'ancien
+  est mis en **drain** (`/tmp/alivaon-drain` : sa sonde — `/api/health` pour
+  le site, `/ping` pour Symfony — répond 503) ; Traefik, qui la contrôle
+  chaque seconde, le retire du trafic ; il est ensuite arrêté. Middleware
+  `retry` sur tous les routeurs. Mesuré en production le 25/09 : 0 erreur
+  (sondes toutes les 0,1 s) sur deux déploiements de chaque.
+- **Changer les labels de `web` ou d'`app`** : par une recréation simple,
+  jamais pendant un remplacement à deux conteneurs (définitions divergentes :
+  Traefik désactive le routeur ou le service). **Un service à la fois** :
+  recréer `app` et `web` ensemble retire tout routeur à `www` pendant
+  quelques secondes (404 de Traefik) et le nouveau `web`, cache vide, répond
+  500 tant que l'API n'est pas prête (incident du 25/09 00:09). Recréer
+  `app`, attendre qu'il soit healthy, puis `web` (~3 s de 503).
+- Back-office (`admin`) : encore redéployé par recréation (quelques secondes
+  d'indisponibilité de l'interface, sans enjeu de référencement).
 - **Retour au site Twig** (dernier recours) : redéployer l'image Symfony
   d'avant la phase 6 — relancer le run `Deploy` de `main` d'alivaon-symfony
   sur le commit `a894ecc` (PR #141) — puis `docker compose stop web` en
@@ -445,6 +453,11 @@ propriétaire le 24/09/2026). Chaque fichier modifié est sauvegardé à côté
 | 25/09/2026 01:46 | Production : alivaon-infra PR #17 (retry), `web` recréé simplement : 8 réponses 503 en ~3 s (sonde), aucune 404 ; `diff-vps.sh` : identique | `production/docker-compose.yml.bak-20260925-014613` |
 | 25/09/2026 01:48 | alivaon-site PR #3 (docs) : déploiement encore par recréation (script sans coupure non inclus par erreur) : 10 réponses 503 en ~3 s | — |
 | 25/09/2026 01:52 | alivaon-site PR #4 : **premier déploiement sans coupure** (`web-2` démarré, `web-1` retiré) : 190/191 requêtes 200, 1 connexion perdue à l'arrêt de l'ancien | — |
+| 25/09/2026 02:01 | Staging : alivaon-infra PR #19 (contrôle de santé Traefik 1 s sur `/ping` et `/api/health`, retry sur tous les routeurs vers Symfony) ; `app` et `web` recréés ; drain vérifié (0 requête vers un conteneur en drain) ; déploiements sans coupure du site (97/97) et de Symfony (1 × 502 au premier, dont l'ancien conteneur n'avait pas encore la règle de drain) | `staging/docker-compose.yml.bak-20260925-020132` |
+| 25/09/2026 02:09 | Production : labels de la PR #19 appliqués en recréant **`app` et `web` ensemble — erreur** : de 00:09:06 à 00:09:17 UTC, ~20 requêtes sur ~300 en échec (502 puis 404 de Traefik sans routeur, puis 500 du nouveau `web` tant que l'API démarrait). Règle ajoutée : un service à la fois | `production/docker-compose.yml.bak-20260925-020903` |
+| 25/09/2026 02:17 | alivaon-symfony PR #144 (drain nginx, workflow sans coupure) → premier déploiement sans coupure de Symfony : 1 111/1 111 requêtes 200 (pages, API, thème, sitemap) | — |
+| 25/09/2026 02:19 | alivaon-site PR #5 (drain) → déploiement du site : 531/531 requêtes 200 | — |
+| 25/09/2026 02:21–02:26 | Seconds déploiements (relances) de Symfony puis du site, sondes à 0,1 s : 131/131 et 102/102 requêtes 200. `diff-vps.sh` : identique | — |
 
 ### Enseignements pour la production
 
