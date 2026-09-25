@@ -173,9 +173,15 @@ services:
       - "traefik.http.routers.alivaon-staging-admin.priority=10"
       - "traefik.http.routers.alivaon-staging-admin.entrypoints=websecure"
       - "traefik.http.routers.alivaon-staging-admin.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.alivaon-staging-admin.middlewares=staging-auth,staging-noindex"
+      - "traefik.http.routers.alivaon-staging-admin.middlewares=staging-auth,staging-noindex,staging-admin-retry"
       - "traefik.http.routers.alivaon-staging-admin.service=alivaon-staging-admin"
       - "traefik.http.services.alivaon-staging-admin.loadbalancer.server.port=3000"
+      # Déploiement sans coupure (workflow d'alivaon-admin) : contrôle de
+      # Traefik chaque seconde (drain) et requête refusée rejouée.
+      - "traefik.http.services.alivaon-staging-admin.loadbalancer.healthcheck.path=/api/health"
+      - "traefik.http.services.alivaon-staging-admin.loadbalancer.healthcheck.interval=1s"
+      - "traefik.http.services.alivaon-staging-admin.loadbalancer.healthcheck.timeout=1s"
+      - "traefik.http.middlewares.staging-admin-retry.retry.attempts=3"
       # admin.staging -> www.admin.staging (301, canonique = www).
       - "traefik.http.routers.alivaon-staging-admin-canonical.rule=Host(`admin.staging.alivaon.com`)"
       - "traefik.http.routers.alivaon-staging-admin-canonical.entrypoints=websecure"
